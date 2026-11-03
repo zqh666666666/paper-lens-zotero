@@ -28,10 +28,10 @@ var PaperLensPlugin = class {
         const selected = this.copyPDFSelection(params.annotation);
         if (!selected) return;
         const wrap=doc.createElement('div'); wrap.className='paper-lens-popup';
-        wrap.style.cssText='display:flex;gap:5px;flex-wrap:wrap;padding:7px 3px;border-top:1px solid #a0a0a055;max-width:300px';
+        wrap.style.cssText='display:flex;gap:4px;flex-wrap:wrap;padding:7px 3px 4px;border-top:1px solid color-mix(in srgb,currentColor 18%,transparent);max-width:300px';
         for(const [label,action] of [['翻译','translate'],['讲懂','explain'],['结合全文','context'],['更多…',null]]) {
           const b=doc.createElement('button'); b.textContent=label;b.type='button';
-          b.style.cssText='padding:4px 8px;border:1px solid #8193a066;border-radius:5px;background:transparent;color:inherit;cursor:pointer';
+          b.style.cssText='padding:4px 8px;border:1px solid color-mix(in srgb,currentColor 25%,transparent);border-radius:5px;background:transparent;color:inherit;font:inherit;cursor:pointer';
           b.addEventListener('click',()=>this.open(reader,selected,action).catch(()=>this.alert('无法打开精读面板，请重新打开 PDF 后重试。')));
           wrap.append(b);
         }
@@ -81,6 +81,32 @@ var PaperLensPlugin = class {
   button(doc,text,fn,cls='pl-button') {
     const b=this.el(doc,'button',cls,text);b.type='button';
     b.addEventListener('click',()=>Promise.resolve().then(fn).catch(e=>this.alert(e.message||'操作未完成。')));return b;
+  }
+  readingIcon(doc,name) {
+    const paths={
+      brand:['M3 5.5 10 3l9 2v15l-9-2-7 2.5z M10 3v15','M14 3.9v7.4l1.9-1 1.8 1.8V4.7'],
+      translate:['M2.5 6h10M7.5 3.5V6 M10.5 6c-1.2 5.2-4 8.3-8 10.1 M5 9c1.1 2.6 2.9 4.7 5.2 6.2','m12 20 4.3-11 4.3 11 M13.6 16h5.5'],
+      explain:['M4 4.5h15v11H9l-5 4z','M7.5 8h8M7.5 11.5h5'],
+      context:['M2.5 5c3.5-.8 6.1-.1 9 1.8 2.9-1.9 5.5-2.6 9-1.8v13c-3.4-.7-6.2.1-9 1.8-2.8-1.7-5.6-2.5-9-1.8z','M11.5 6.8v13']
+    };
+    const ns='http://www.w3.org/2000/svg';
+    const svg=doc.createElementNS(ns,'svg');
+    svg.setAttribute('class',name==='brand'?'pl-brand-mark':'pl-icon');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.setAttribute('fill','none');
+    svg.setAttribute('stroke','currentColor');
+    svg.setAttribute('stroke-width',name==='brand'?'1.6':'1.5');
+    svg.setAttribute('stroke-linecap','round');
+    svg.setAttribute('stroke-linejoin','round');
+    svg.setAttribute('aria-hidden','true');
+    svg.setAttribute('focusable','false');
+    for(const [i,d] of paths[name].entries()){
+      const path=doc.createElementNS(ns,'path');
+      path.setAttribute('d',d);
+      if(name==='brand'&&i===1){path.setAttribute('fill','var(--pl-tab)');path.setAttribute('stroke','var(--pl-tab)');}
+      svg.append(path);
+    }
+    return svg;
   }
   async keyFor(baseURL,kind='text') {
     const identity=(kind==='vision'?'vision:':'')+this.C.endpoint(baseURL);
@@ -287,7 +313,7 @@ var PaperLensPlugin = class {
       if (panel.session === session) {
         panel.selected = null;
         this.readerSelections.delete(panel.reader);
-        if (panel.sources) panel.sources.replaceChildren(this.el(panel.doc,'summary','','本次使用的原文'));
+        if (panel.sources) {panel.sources.hidden=true;panel.sources.open=false;panel.sources.replaceChildren();}
         panel.status.textContent = '已清空这篇论文的阅读记录。';
       }
     }
@@ -378,7 +404,7 @@ var PaperLensPlugin = class {
     if(view.answer!==t.answer){this.renderAnswer(p,view.content,t.answer,t.sources||[],t.selection||{pageIndex:0},t.pinned);view.answer=t.answer;}
     const mark=p.session.marks[t.id]||'';
     view.meta.textContent=`${t.model||''} · ${new Date(t.time).toLocaleString()}${t.pending?' · 正在生成':t.recovered?' · 已恢复未完成回答':t.partial?' · 未完成':''}${mark?' · '+mark:''}`;
-    const state=[!!t.pending,!!t.partial,!!t.answer,t.action||'',t.question||''].join('|');
+    const state=[!!t.pending,!!t.partial,!!t.answer,t.action||'',t.question||'',mark].join('|');
     if(view.actionState===state)return;view.actionState=state;view.buttons.replaceChildren();
     if(t.pending)return;
     const buttons=view.buttons;
@@ -387,20 +413,24 @@ var PaperLensPlugin = class {
       const translation=t.action==='translate'||(!t.action&&t.question==='翻译');
       buttons.append(this.button(p.doc,translation?'拆解长句':t.selection?.kind==='vision'?'结合原页深入展开':'深入展开',()=>this.expandTurn(p,view.turn,translation)));
     }
-    buttons.append(this.button(p.doc,'保存笔记',()=>this.saveNote(p,view.turn)),this.button(p.doc,'复制',()=>{
+    buttons.append(this.button(p.doc,'复制',()=>{
       Components.classes['@mozilla.org/widget/clipboardhelper;1'].getService(Components.interfaces.nsIClipboardHelper).copyString(view.turn.answer);
       p.status.textContent='已复制回答。';
     }));
+    for(const label of ['已懂','仍有疑问']){
+      const markButton=this.button(p.doc,label,async()=>{
+        p.session.marks[view.turn.id]=label;await this.persist(p.reader);
+        if(this.updateSessionViews)this.updateSessionViews(p.session);else this.refreshTurn(p,view,view.turn);
+      });
+      markButton.setAttribute('aria-pressed',String(mark===label));
+      buttons.append(markButton);
+    }
     if(t.answer){
       const write=this.el(p.doc,'details','pl-writeback');
-      write.append(this.el(p.doc,'summary','','写入 Zotero…'));
+      write.append(this.el(p.doc,'summary','','写入 Zotero…'),this.button(p.doc,'保存笔记',()=>this.saveNote(p,view.turn)));
       PaperLensWriteback.addActions(this,p,t,write);
       buttons.append(write);
     }
-    for(const label of ['已懂','仍有疑问'])buttons.append(this.button(p.doc,label,async()=>{
-      p.session.marks[view.turn.id]=label;await this.persist(p.reader);
-      if(this.updateSessionViews)this.updateSessionViews(p.session);else this.refreshTurn(p,view,view.turn);
-    }));
   }
   async expandTurn(p,t,translation=false) {
     if(p.busy||t.pending)return;
@@ -413,8 +443,11 @@ var PaperLensPlugin = class {
     const root=this.el(doc,'aside','pl-root');root.setAttribute('aria-label','循文论文精读助手');
     const style=this.el(doc,'style');style.textContent=this.css;root.append(style);
     const header=this.el(doc,'header','pl-header');
-    const brand=this.el(doc,'div');brand.append(this.el(doc,'strong','pl-brand','循文'),this.el(doc,'span','pl-caption','PAPER LENS'));
-    const controls=this.el(doc,'div','pl-row');header.append(brand,controls);root.append(header);
+    const brand=this.el(doc,'div','pl-brand-lockup');
+    const wordmark=this.el(doc,'div','pl-brand-type');
+    wordmark.append(this.el(doc,'strong','pl-brand','循文'),this.el(doc,'span','pl-caption','PAPER LENS'));
+    brand.append(this.readingIcon(doc,'brand'),wordmark);
+    const controls=this.el(doc,'div','pl-row pl-header-controls');header.append(brand,controls);root.append(header);
     const p={reader,root,doc,session,selected:session.selection?{...session.selection}:null,busy:false,turnViews:new Map()};this.panels.set(reader,p);
     const cfg=this.config();
     p.smaller=this.button(doc,'A−',()=>this.setReadingFont(p,p.fontSize-1,true));p.smaller.setAttribute('aria-label','缩小回答字号');p.smaller.title='缩小回答字号';
@@ -433,7 +466,7 @@ var PaperLensPlugin = class {
     p.page=this.el(doc,'button','pl-page');p.page.type='button';p.page.addEventListener('click',()=>{if(p.selected)this.navigateSource(p,p.selected).catch(()=>{p.status.textContent='暂时无法定位原文，请等待 PDF 加载后重试。';});});
     p.collapse=this.button(doc,'折叠选段',()=>this.setSelectionCollapsed(p,!p.selectionBody.hidden,true),'pl-button pl-collapse');
     sourceHeader.append(p.page,p.collapse);source.append(sourceHeader);
-    const sourceBody=this.el(doc,'div');p.selectionBody=sourceBody;
+    const sourceBody=this.el(doc,'div','pl-selection-body');p.selectionBody=sourceBody;
     p.selection=this.el(doc,'textarea','pl-selected');p.selection.setAttribute('aria-label','当前选段，可纠正公式识别');p.selection.rows=4;
     const readEditedSelection = () => {
       p.selected = {...(p.selected || {pageIndex:0}), text:p.selection.value};
@@ -446,9 +479,9 @@ var PaperLensPlugin = class {
       this.commitEditedPassage(p).catch(() => { p.status.textContent='选段暂未保存，请稍后重试。'; });
     });
     sourceBody.append(p.selection);
-    const pinRow=this.el(doc,'div','pl-row');p.pinRow=pinRow;
+    const pinRow=this.el(doc,'div','pl-row pl-pin-tools');p.pinRow=pinRow;
     pinRow.append(this.button(doc,'设为比较段',async()=>{if(!p.selected?.text)return;if(p.selected.text.length>20000)throw new Error('比较段请控制在 20,000 字内。');session.pinned={...p.selected};await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}),this.button(doc,'清除比较段',async()=>{session.pinned=null;await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}));
-    p.pin=this.el(doc,'small','pl-muted');sourceBody.append(pinRow,p.pin);source.append(sourceBody);
+    p.pin=this.el(doc,'small','pl-muted');source.append(sourceBody);
     p.passageCache = this.el(doc, 'details', 'pl-passage-cache');
     p.passageSummary = this.el(doc, 'summary');
     p.passageList = this.el(doc, 'ul', 'pl-passage-list');
@@ -467,43 +500,81 @@ var PaperLensPlugin = class {
     p.passageCache.append(p.passageSummary, p.passageList, p.passageNav);
     p.passageCache.addEventListener('toggle', () => this.renderPassageCache(p));
     const readingControls=this.el(doc,'div','pl-reading-controls');root.append(readingControls);
-    source.append(p.passageCache);readingControls.append(source);
-    const options=this.el(doc,'div','pl-options');
-    p.depth=this.select(doc,[['basic','从基础讲'],['standard','专业基础'],['advanced','深入原理']],cfg.depth,'解释深度');
-    p.length=this.select(doc,[['brief','简短回答'],['standard','适中长度'],['detailed','详细展开']],cfg.answerLength||'brief','回答长度');
-    p.scope=this.select(doc,[['selection','只发选段'],['page','当前页'],['related','全文检索相关段落']],cfg.scope,'发送上下文范围');
-    for(const [key,control] of [['depth',p.depth],['answerLength',p.length],['scope',p.scope]])control.addEventListener('change',()=>this.saveReadingPrefs({[key]:control.value}));
-    options.append(p.depth,p.length,p.scope);readingControls.append(options);
+    const passageTools=this.el(doc,'div','pl-passage-tools');
+    passageTools.append(p.passageCache,pinRow);source.append(passageTools,p.pin);readingControls.append(source);
     const actions=this.el(doc,'nav','pl-actions');actions.setAttribute('aria-label','精读操作');
     for (const action of ['translate', 'explain', 'context']) {
-      actions.append(this.button(doc, this.C.ACTIONS[action][0], () => this.run(p, action)));
+      const button=this.button(doc,'',()=>this.run(p,action));
+      button.append(this.readingIcon(doc,action),this.el(doc,'span','',this.C.ACTIONS[action][0]));
+      actions.append(button);
     }
+    readingControls.append(actions);
+    const extra=this.el(doc,'div','pl-extra-controls');readingControls.append(extra);
+    const prefs=this.el(doc,'details','pl-preferences'), options=this.el(doc,'div','pl-options');
+    const prefSummary=this.el(doc,'summary','','阅读选项');
+    const values=this.el(doc,'span','pl-pref-values');prefSummary.append(values);
+    prefs.append(prefSummary,options);extra.append(prefs);
+    const choices=[
+      ['depth','depth','解释深度',[['basic','从基础讲'],['standard','专业基础'],['advanced','深入原理']]],
+      ['length','answerLength','回答长度',[['brief','简短回答'],['standard','适中长度'],['detailed','详细展开']]],
+      ['scope','scope','发送范围',[['selection','只发选段'],['page','当前页'],['related','全文检索相关段落']]]
+    ];
+    const refreshOptions=()=>{
+      const selectedLabel=control=>Array.from(control.children).find(option=>option.value===control.value)?.textContent;
+      values.textContent=[p.depth,p.length,p.scope].map(selectedLabel).join(' · ');
+    };
+    for(const [prop,key,label,items] of choices){
+      const field=this.el(doc,'label','pl-option-field');
+      const control=this.select(doc,items,cfg[key],label);
+      p[prop]=control;
+      field.append(this.el(doc,'span','',label),control);
+      options.append(field);
+      control.addEventListener('change',()=>{
+        this.saveReadingPrefs({[key]:control.value});
+        refreshOptions();
+      });
+    }
+    refreshOptions();
     const more=this.select(doc,[['','更多精读功能…'],...Object.entries(this.C.ACTIONS).filter(([k])=>!['translate','explain','context','ask','continue'].includes(k)).map(([k,v])=>[k,v[0]])],'','更多精读功能');
-    more.addEventListener('change',()=>{const v=more.value;more.value='';if(v)this.run(p,v);});actions.append(more);readingControls.append(actions);
+    more.addEventListener('change',()=>{const v=more.value;more.value='';if(v)this.run(p,v);});
     const toolbox=this.el(doc,'details','pl-toolbox');
-    toolbox.append(this.el(doc,'summary','','阅读工具 · 多篇问答、读图、指令与笔记'));
-    const toolBody=this.el(doc,'div','pl-tools-body');toolbox.append(toolBody);readingControls.append(toolbox);
+    const toolSummary=this.el(doc,'summary','','阅读工具');
+    toolSummary.append(this.el(doc,'span','pl-tool-hint','多篇问答 · 读图 · 指令与笔记'));
+    const toolBody=this.el(doc,'div','pl-tools-body');toolBody.append(more);toolbox.append(toolSummary,toolBody);extra.append(toolbox);
     PaperLensResearch.mount(this,p,toolBody);
     PaperLensCommands.mount(this,p,toolBody);
     PaperLensWriteback.mount(this,p,toolBody);
-    p.status=this.el(doc,'div','pl-status',session.loadWarning||'选择操作开始精读 · 仅在点击后发送内容');p.status.setAttribute('role','status');root.append(p.status);
-    p.sources=this.el(doc,'details','pl-sources');p.sources.append(this.el(doc,'summary','','本次使用的原文'));root.append(p.sources);
+    p.status=this.el(doc,'div','pl-status',session.loadWarning||'');p.status.setAttribute('role','status');root.append(p.status);
+    p.sources=this.el(doc,'details','pl-sources');p.sources.hidden=true;root.append(p.sources);
     p.feed=this.el(doc,'div','pl-feed');p.feed.setAttribute('aria-label','阅读对话');root.append(p.feed);
-    const compose=this.el(doc,'footer','pl-compose');p.question=this.el(doc,'textarea');p.question.placeholder='追问、回答自测，或描述你卡住的地方…';p.question.rows=2;p.question.setAttribute('aria-label','追问');
+    const compose=this.el(doc,'footer','pl-compose'),input=this.el(doc,'div','pl-compose-input');
+    p.question=this.el(doc,'textarea');p.question.placeholder='追问这篇论文…';p.question.rows=2;p.question.setAttribute('aria-label','追问');
+    input.append(p.question);
     p.question.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&!e.isComposing){e.preventDefault();const q=p.question.value.trim();if(q)this.run(p,'ask',q);}});
+    const menu=this.el(doc,'details','pl-conversation-menu'),menuSummary=this.el(doc,'summary','','会话操作');
+    const menuContent=this.el(doc,'div','pl-menu-content');
+    menu.append(menuSummary,menuContent);
+    menu.addEventListener('keydown',event=>{
+      if(event.key==='Escape'&&menu.open){event.preventDefault();menu.open=false;menuSummary.focus();}
+    });
+    menu.addEventListener('focusout',e=>{if(e.relatedTarget&&!menu.contains(e.relatedTarget))menu.open=false;});
+    root.addEventListener('pointerdown',e=>{if(menu.open&&!menu.contains(e.target))menu.open=false;});
     const suggestions=this.el(doc,'div','pl-row pl-suggestions');
-    for(const q of ['举个例子','从基础讲起','与前文有什么关系？'])suggestions.append(this.button(doc,q,()=>{p.question.value=q;p.question.focus();}));
-    compose.append(suggestions);
-    const sendRow=this.el(doc,'div','pl-row pl-send-row');
+    for(const q of ['举个例子','从基础讲起','与前文有什么关系？'])suggestions.append(this.button(doc,q,()=>{menu.open=false;p.question.value=q;p.question.focus();}));
+    menuContent.append(this.el(doc,'small','pl-muted','快捷追问'),suggestions);
+    const bar=this.el(doc,'div','pl-compose-bar'),sendRow=this.el(doc,'div','pl-row pl-send-row');
     p.send=this.button(doc,'发送追问',()=>{const q=p.question.value.trim();if(q)this.run(p,'ask',q);},'pl-button pl-primary');
-    p.cancel=this.button(doc,'停止',()=>{p.cancelled=true;p.abort?.();});p.cancel.disabled=true;
+    p.send.title='发送追问（⌘ / Ctrl + Enter）';
+    p.cancel=this.button(doc,'停止',()=>{p.cancelled=true;p.abort?.();},'pl-button pl-stop');p.cancel.disabled=true;
     p.export=this.select(doc,[['','导出会话…'],['json','JSON 备份'],['md','Markdown 笔记']],'','导出会话格式');
-    p.export.addEventListener('change',()=>{const format=p.export.value;p.export.value='';if(format)this.exportSession(p,format).catch(e=>{p.status.textContent=e.message||'会话导出失败，请重试。';});});
-    sendRow.append(p.send,p.cancel,p.export,this.button(doc,'清空会话',async()=>{
+    p.export.addEventListener('change',()=>{const format=p.export.value;p.export.value='';if(format){menu.open=false;menuSummary.focus?.();this.exportSession(p,format).catch(e=>{p.status.textContent=e.message||'会话导出失败，请重试。';});}});
+    menuContent.append(p.export,this.button(doc,'清空会话',async()=>{
+      menu.open=false;menuSummary.focus();
       if([...this.panels.values()].some(other=>other.session===session&&other.busy)){p.status.textContent='这篇论文仍有回答正在生成，请停止后再清空。';return;}
       if(!Services.prompt.confirm(null,'清空当前论文会话','清除这篇论文的对话、当前选段、段落缓存、比较段和理解标记？已保存的 Zotero 笔记不受影响。')) return;
       session.turns=[];session.pinned=null;session.marks={};this.clearSelections(session);delete session.loadWarning;await this.persist(reader,true);if(this.updateSessionViews)this.updateSessionViews(session);else{this.renderFeed(p);this.renderSelection(p);}
-    }));compose.append(p.question,sendRow);root.append(compose);
+    }));
+    sendRow.append(p.cancel,p.send);bar.append(menu,sendRow);compose.append(input,bar);root.append(compose);
     // A chrome sibling keeps the API request outside the unprivileged PDF iframe.
     const iframe=reader._iframe || doc.getElementById('reader');
     if(!iframe?.parentElement)throw new Error('当前阅读器没有可挂载的面板位置。');
@@ -519,11 +590,17 @@ var PaperLensPlugin = class {
     for(const [v,t] of choices){const o=this.el(doc,'option','',t);o.value=v;s.append(o);}s.value=value;return s;
   }
   renderSelection(p) {
-    const s=p.selected;if(p.selection.value!==(s?.text||''))p.selection.value=s?.text||'';
+    const s=p.selected;
+    if(p.selection.value!==(s?.text||'')){
+      p.selection.value=s?.text||'';
+      p.selection.scrollTop=0;
+      p.selection.scrollLeft=0;
+    }
     if(p.pinRow)p.pinRow.lastElementChild.hidden=!p.session.pinned;
     p.selection.placeholder='在 PDF 中选中文字，或在这里粘贴需要解释的内容。';
     p.page.textContent=s?`选段 · PDF 第 ${s.pageIndex+1} 页 ↗`:'当前选段';p.page.disabled=!s?.text;
-    p.pin.textContent=p.session.pinned?`比较段 · 第 ${p.session.pinned.pageIndex+1} 页　${p.session.pinned.text.slice(0,65)}`:'设好比较段后，可选另一段进行跨段比较。';
+    p.pin.hidden=!p.session.pinned;
+    p.pin.textContent=p.session.pinned?`比较段 · 第 ${p.session.pinned.pageIndex+1} 页　${p.session.pinned.text.slice(0,65)}`:'';
     this.renderPassageCache(p);
   }
   renderPassageCache(p) {
@@ -574,7 +651,7 @@ var PaperLensPlugin = class {
       const keys=new Set(p.session.turns.map(t=>t.id||t));
       for(const [key,view] of p.turnViews)if(!keys.has(key)){view.card.remove();p.turnViews.delete(key);}
       if(!p.session.turns.length) {
-        if(!p.empty){p.empty=this.el(p.doc,'p','pl-empty','从一句话开始，把概念、方法与证据连起来。\n\n选择“讲懂这段”，或在“更多”里追踪符号、拆解公式、演示方法。');p.feed.append(p.empty);}
+        if(!p.empty){p.empty=this.el(p.doc,'div','pl-empty');p.empty.append(this.el(p.doc,'strong','','划选原文，开始精读'),this.el(p.doc,'p','','在左侧 PDF 里选一段文字，再点「翻译」或「讲懂这段」。'));p.feed.append(p.empty);}
       } else {
         p.empty?.remove();p.empty=null;
         for(const t of p.session.turns){const view=p.turnViews.get(t.id||t);if(view)this.refreshTurn(p,view,t);else this.appendTurn(p,t);}
@@ -650,7 +727,17 @@ var PaperLensPlugin = class {
   appendTurn(p,t) {
     const position=this.captureFeedPosition(p);p.empty?.remove();p.empty=null;
     const card=this.el(p.doc,'article','pl-turn');
-    card.append(this.el(p.doc,'div','pl-turn-title',t.label||t.question));
+    const heading=this.el(p.doc,'header','pl-turn-header');
+    heading.append(this.el(p.doc,'h3','pl-turn-title',t.label||t.question));
+    const origin=t.selection;
+    if(origin&&(!origin.kind||origin.kind==='vision')&&Number.isInteger(origin.pageIndex)&&origin.pageIndex>=0){
+      const page=origin.pageIndex+1;
+      const link=this.button(p.doc,'P. '+page+' ↗',()=>this.navigateSource(p,origin),'pl-origin-page');
+      link.title='返回原文 · PDF 第 '+page+' 页';
+      link.setAttribute('aria-label',link.title);
+      heading.append(link);
+    }
+    card.append(heading);
     if(t.label&&t.label!==t.question)card.append(this.el(p.doc,'p','pl-task-question',t.question));
     const content=this.el(p.doc,'div','pl-answer');
     card.append(content);
@@ -881,6 +968,7 @@ var PaperLensPlugin = class {
     }
   }
   renderSources(p,sources,selection,pinned,includePinned,stats=null) {
+    p.sources.hidden=false;
     p.sources.replaceChildren(this.el(p.doc,'summary','',`本次使用的原文 · ${sources.length} 个检索片段`));
     if(stats)p.sources.append(this.el(p.doc,'p','pl-muted',`总输入 ${stats.totalChars.toLocaleString()} / ${stats.limit.toLocaleString()} 字（含提示词、选段和历史）。带入 ${stats.historyCount} 轮对话；省略 ${stats.omittedHistory} 轮、${stats.omittedSources} 个候选片段。${stats.truncatedSources||stats.truncatedHistory?'部分检索文字或历史已按预算截取。':''}`));
     const rows=[{...selection,id:selection.kind?'任务材料':'选段'},...(includePinned&&pinned?[{...pinned,id:'暂存'}]:[]),...sources];
