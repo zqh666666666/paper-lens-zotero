@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "verifiedDate": "2026-11-02",
+  "description": "Small source-checked excerpt locator benchmark. The excerpts below are real short quotations, not generated paper text. The agent assigned expected pages after inspecting the linked PDFs; these labels have not received independent human review.",
+  "limitations": [
+    "Only 3 papers and 9 short excerpts: this is a locator smoke test, not a full-paper retrieval benchmark or a general recall estimate.",
+    "Page indexes are zero-based physical pages of the linked PDF edition. An excerpt's start/end within this fixture does not represent its position within the full PDF.",
+    "Questions and labels are curated by the implementing agent, so there is selection bias. No independent annotator agreement is claimed.",
+    "One relevant Chinese paraphrase deliberately exercises the known cross-language lexical-retrieval limitation; it must remain visible in the report even when missed.",
+    "No entire PDFs are redistributed. Each paper contributes no more than 25 quoted words; no permission to redistribute the complete papers is assumed."
+  ],
+  "papers": [
+    {
+      "id": "dropout-2014",
+      "title": "Dropout: A Simple Way to Prevent Neural Networks from Overfitting",
+      "authors": "Nitish Srivastava et al.",
+      "year": 2014,
+      "source": "https://jmlr.org/papers/volume15/srivastava14a/srivastava14a.pdf",
+      "pages": [
+        {"pageIndex": 0, "text": "This prevents units from co-adapting too much.", "location": "Abstract, after the description of dropping units during training"},
+        {"pageIndex": 1, "text": "The choice of which units to drop is random.", "location": "Introduction, final paragraph on physical page 2"},
+        {"pageIndex": 2, "text": "the weights are multiplied by p.", "location": "Figure 2 caption"}
+      ],
+      "queries": [
+        {"id": "dropout-coadaptation", "query": "co-adapting", "expectedPages": [0]},
+        {"id": "dropout-random-choice", "query": "choice units random", "expectedPages": [1]},
+        {"id": "dropout-weight-scaling", "query": "weights multiplied", "expectedPages": [2]},
+        {"id": "dropout-chinese-paraphrase", "query": "为什么神经元不会过度相互依赖", "expectedPages": [0], "knownLimitation": "Chinese paraphrase has no shared lexical term or configured expansion."},
+        {"id": "dropout-absent-topic", "query": "cyclostationary demodulation", "expectedPages": []}
+      ]
+    },
+    {
+      "id": "scikit-learn-2011",
+      "title": "Scikit-learn: Machine Learning in Python",
+      "authors": "Fabian Pedregosa et al.",
+      "year": 2011,
+      "source": "https://jmlr.org/papers/volume12/pedregosa11a/pedregosa11a.pdf",
+      "pages": [
+        {"pageIndex": 1, "text": "Emphasis is put on ease of use, performance, documentation, and API consistency.", "location": "Abstract"},
+        {"pageIndex": 2, "text": "The central object is an estimator", "location": "Section 4, Code Design"},
+        {"pageIndex": 3, "text": "Table 1: Time in seconds", "location": "Beginning of Table 1 caption"}
+      ],
+      "queries": [
+        {"id": "sklearn-api", "query": "API consistency", "expectedPages": [1]},
+        {"id": "sklearn-estimator", "query": "central estimator", "expectedPages": [2]},
+        {"id": "sklearn-table", "query": "Table 1", "expectedPages": [3]},
+        {"id": "sklearn-wrong-figure", "query": "Figure 1", "expectedPages": []}
+      ]
+    },
+    {
+      "id": "random-forests-2001",
+      "title": "Random Forests",
+      "authors": "Leo Breiman",
+      "year": 2001,
+      "edition": "January 2001 author PDF, 33 physical pages",
+      "source": "https://www.stat.berkeley.edu/~breiman/randomforest2001.pdf",
+      "pages": [
+        {"pageIndex": 0, "text": "Random forests are a combination of tree predictors", "location": "Beginning of abstract"},
+        {"pageIndex": 2, "text": "These are called out-of-bag estimates", "location": "Section 1.2, Outline of Paper"},
+        {"pageIndex": 3, "text": "where I(•) is the indicator function.", "location": "Section 2.1, after the margin-function definition"}
+      ],
+      "queries": [
+        {"id": "forest-predictors", "query": "tree predictors", "expectedPages": [0]},
+        {"id": "forest-oob", "query": "out-of-bag estimates", "expectedPages": [2]},
+        {"id": "forest-indicator", "query": "indicator function", "expectedPages": [3]},
+        {"id": "forest-absent-topic", "query": "convolutional pooling", "expectedPages": []}
+      ]
+    }
+  ]
+}

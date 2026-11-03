@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "循文 · Paper Lens",
+  "version": "0.2.3",
+  "description": "选段翻译、论文上下文讲解、方法与公式精读。支持自定义 API Key。",
+  "applications": {
+    "zotero": {
+      "id": "paper-lens@local.tools",
+      "strict_min_version": "10.0",
+      "strict_max_version": "10.0.*",
+      "update_url": "https://paper-lens.invalid/updates.json"
+    }
+  }
+}

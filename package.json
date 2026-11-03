@@ -1,0 +1,13 @@
+{
+  "name": "paper-lens-zotero",
+  "version": "0.2.3",
+  "private": true,
+  "license": "MIT",
+  "description": "循文 · Zotero 论文精读助手",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "build": "python3 scripts/build.py",
+    "check": "node --check bootstrap.js && node --check src/core.js && node --check src/plugin.js && node --check src/math.js && node --check src/retrieval.js && node --check src/locations.js && node --check src/pdf-text.js",
+    "benchmark": "node scripts/evaluate-retrieval.cjs"
+  }
+}
