@@ -20,6 +20,11 @@ class Element {
   replaceChildren(...nodes){for(const node of this.children)node.parentNode=null;this.children=[];this.append(...nodes);}
   remove(){if(this.parentNode){const siblings=this.parentNode.children;siblings.splice(siblings.indexOf(this),1);this.parentNode=null;}}
   setAttribute(key,value){this.attributes[key]=value;}
+  getAttribute(key){return this.attributes[key]??null;}
+  querySelector(selector){
+    if(!selector.startsWith('.'))throw new Error('Unsupported selector: '+selector);
+    return findElement(this,node=>node!==this&&node.className?.split(' ').includes(selector.slice(1)))??null;
+  }
   addEventListener(name,fn){if(!this.listeners.has(name))this.listeners.set(name,[]);this.listeners.get(name).push(fn);}
   dispatch(name,event={}){for(const fn of this.listeners.get(name)||[])fn(event);}
   setPointerCapture(){}
@@ -32,22 +37,74 @@ class Element {
   }
 }
 
+function findElement(node, matches) {
+  if (matches(node)) return node;
+  for (const child of node.children) {
+    const match=findElement(child,matches);
+    if (match) return match;
+  }
+}
+
+function makeDocument() {
+  const documentElement=new Element('html');
+  return {documentElement,getElementById:id=>findElement(documentElement,el=>el.id===id)??null,
+    createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>{const n=new Element('#text');n.textContent=text;return n;}};
+}
+
+function makeReader(doc) {
+  const host=new Element('host'),iframe=new Element('iframe');host.append(iframe);doc.documentElement.append(host);
+  return {_window:{document:doc},_iframe:iframe,navigate(){}};
+}
+
 function setup(config={},session={turns:[],selection:{pageIndex:0,text:'current'},marks:{},pinned:null}) {
   let prefs=JSON.stringify({...Core.DEFAULTS,...config});
-  const doc={createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>{const n=new Element('#text');n.textContent=text;return n;}};
-  const host=new Element('host'),iframe=new Element('iframe');host.append(iframe);
+  const doc=makeDocument();
   const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),URL,Zotero:{Items:{get:()=>({id:1,key:'FIXTURE',libraryID:1,getField:()=> 'Reading fixture'})},Prefs:{get:()=>prefs,set:(key,value)=>{prefs=value;}}}};
   vm.createContext(ctx);for(const name of ['research','commands','writeback','plugin'])vm.runInContext(fs.readFileSync('src/'+name+'.js','utf8'),ctx);
   const plugin=vm.runInContext('new PaperLensPlugin("")',ctx);
   let rendered=0;plugin.renderAnswer=(p,target,text)=>{rendered++;target.textContent=text;};
   plugin.persist=async()=>{};
   plugin.commitEditedPassage=async p=>{p.session.selection={...p.selected};};
-  const reader={_window:{document:doc},_iframe:iframe,navigate(){}};
+  const reader=makeReader(doc);
   const panel=plugin.makePanel(reader,session);
   return {plugin,panel,doc,getPrefs:()=>JSON.parse(prefs),rendered:()=>rendered};
 }
 
 function turns(count){return Array.from({length:count},(_,i)=>({id:'turn-'+i,answer:'answer '+i,question:'explain',time:1,model:'fixture',selection:{text:'passage '+i,pageIndex:i},sources:[],partial:false}));}
+
+test('theme changes in either settings window persist immediately without a configured model or key',async()=>{
+  const {plugin,panel,getPrefs}=setup({model:'',fontSize:16});
+  plugin.keyFor=async()=>'';
+  const second=plugin.makePanel(makeReader(makeDocument()),panel.session);
+  plugin.settings(panel);
+  const libraryDoc=makeDocument();
+  await plugin.settingsWindow({document:libraryDoc});
+  const floating=libraryDoc.getElementById('paper-lens-settings-host');
+  const roots=[panel.root,second.root,floating];
+  const themeSelect=root=>findElement(root,node=>node.tagName==='select'&&node.attributes['aria-label']==='侧栏外观');
+  const readerSelect=themeSelect(panel.root),librarySelect=themeSelect(floating);
+  assert.ok(readerSelect&&librarySelect,'both settings entry points expose appearance');
+  const set=(control,value)=>{control.value=value;control.dispatch('change');};
+  const expectTheme=value=>{
+    for(const root of roots)assert.equal(root.attributes['data-pl-theme'],value);
+    assert.equal(readerSelect.value,value);
+    assert.equal(librarySelect.value,value);
+  };
+  expectTheme('system');
+  set(readerSelect,'dark');
+  expectTheme('dark');
+  assert.equal(getPrefs().appearance,'dark');
+  const next=plugin.makePanel(makeReader(makeDocument()),panel.session);
+  roots.push(next.root);
+  expectTheme('dark');
+  set(librarySelect,'light');
+  expectTheme('light');
+  const saved=getPrefs();
+  assert.equal(saved.appearance,'light');assert.equal(saved.fontSize,16);assert.equal(saved.model,'');
+  assert.equal(setup(saved).panel.root.attributes['data-pl-theme'],'light');
+  set(librarySelect,'system');
+  expectTheme('system');assert.equal(getPrefs().appearance,'system');
+});
 
 test('reader width, font, collapse and independent response length persist safely',()=>{
   const {plugin,panel,getPrefs}=setup({model:'fixture',panelWidth:500,fontSize:16,selectionCollapsed:true,apiKey:'must-not-persist'});

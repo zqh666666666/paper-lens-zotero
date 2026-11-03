@@ -4,7 +4,7 @@
 
 ## 安装与配置
 
-面向 **macOS Zotero 10.0.x**。**0.4.1** 将当前选段和三个常用精读按钮放在顶部，回答偏好和阅读工具可以展开，底部可直接追问。各版本的测试范围见 [验证记录](VALIDATION.md)。
+面向 **macOS Zotero 10.0.x**。从 **0.4.2** 起，可以在侧栏右上角的 **设置 → 侧栏外观** 选择「跟随系统」（默认）、「浅色」或「深色」。选择会立即保存，对所有循文侧栏生效，不改变 PDF 页面的配色，也不需要配置 API Key。各版本的测试范围见 [验证记录](VALIDATION.md)。
 
 1. 在 [GitHub Releases](https://github.com/zqh666666666/paper-lens-zotero/releases/latest) 下载 `.xpi` 安装包。打开 Zotero → 工具 → 插件 → 齿轮 → Install Plugin From File，选择下载的文件。
 2. 打开 PDF，使用 **工具 → 循文 · API 设置**。安装前已经打开的阅读器可能需要重新打开，工具菜单始终可用。

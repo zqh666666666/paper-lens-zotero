@@ -18,7 +18,7 @@
     continue: ['继续回答', '从上次回答的中断位置继续正文，不重复已输出的内容。只依据提供的原文；若上次回答完整则简短补充遗漏。'],
     ask: ['继续追问', '回答用户追问，结合本轮选段、提供的上下文与之前的对话。必要时纠正先前解释。']
   };
-  const DEFAULTS = { baseURL: 'https://api.deepseek.com', model: '', contextChars: 36000, maxTokens: 2400, depth: 'standard', answerLength: 'brief', scope: 'related', remember: true, thinking: 'disabled' };
+  const DEFAULTS = { baseURL: 'https://api.deepseek.com', model: '', contextChars: 36000, maxTokens: 2400, depth: 'standard', answerLength: 'brief', scope: 'related', remember: true, thinking: 'disabled', appearance: 'system' };
   const TOOL_TASKS = {
     custom:'执行用户明确指定的快捷指令，仅依据本次附带的材料回答。',
     rewrite:'根据用户要求改写提供的笔记选文。只输出可直接用于替换的正文，保留原意，不补造事实。'

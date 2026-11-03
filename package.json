@@ -1,6 +1,6 @@
 {
   "name": "paper-lens-zotero",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "license": "MIT",
   "description": "循文 · Zotero 论文精读助手",

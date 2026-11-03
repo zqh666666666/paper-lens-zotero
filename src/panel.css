@@ -1,17 +1,17 @@
 /* The reader's margin: quotation, reading controls, commentary, and a place to ask. */
 .pl-root {
-  --pl-paper: #f6f5ef;
-  --pl-surface: #fdfcf9;
-  --pl-quote: #edf1e9;
-  --pl-ink: #26332e;
-  --pl-muted: #5e6b63;
-  --pl-line: #ccd3c9;
-  --pl-rule: #dde2d9;
-  --pl-accent: #216149;
-  --pl-accent-ink: #ffffff;
-  --pl-tint: #e0ece1;
-  --pl-tab: #98682d;
-  --pl-shadow: 0 5px 18px #202f2324;
+  --pl-paper: light-dark(#f6f5ef, #222725);
+  --pl-surface: light-dark(#fdfcf9, #2a302d);
+  --pl-quote: light-dark(#edf1e9, #2d3730);
+  --pl-ink: light-dark(#26332e, #edf0e7);
+  --pl-muted: light-dark(#5e6b63, #b2beb3);
+  --pl-line: light-dark(#ccd3c9, #505c53);
+  --pl-rule: light-dark(#dde2d9, #3e4941);
+  --pl-accent: light-dark(#216149, #a5d8b5);
+  --pl-accent-ink: light-dark(#ffffff, #173424);
+  --pl-tint: light-dark(#e0ece1, #354b3c);
+  --pl-tab: light-dark(#98682d, #d6ae70);
+  --pl-shadow: 0 5px 18px light-dark(#202f2324, #12161266);
   --pl-gutter: 15px;
   --pl-font-size: 13px;
   --pl-ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -32,29 +32,14 @@
   border-inline-start: 1px solid var(--pl-line);
   background: var(--pl-paper);
   color: var(--pl-ink);
-  color-scheme: light;
+  color-scheme: light dark;
   font: 13px/1.55 var(--pl-ui);
   text-align: start;
   scrollbar-color: var(--pl-line) transparent;
 }
 
-@media (prefers-color-scheme: dark) {
-  .pl-root {
-    --pl-paper: #222725;
-    --pl-surface: #2a302d;
-    --pl-quote: #2d3730;
-    --pl-ink: #edf0e7;
-    --pl-muted: #b2beb3;
-    --pl-line: #505c53;
-    --pl-rule: #3e4941;
-    --pl-accent: #a5d8b5;
-    --pl-accent-ink: #173424;
-    --pl-tint: #354b3c;
-    --pl-tab: #d6ae70;
-    --pl-shadow: 0 5px 18px #12161266;
-    color-scheme: dark;
-  }
-}
+.pl-root[data-pl-theme="light"] { color-scheme: light; }
+.pl-root[data-pl-theme="dark"]  { color-scheme: dark; }
 
 .pl-root *, .pl-root *::before, .pl-root *::after { box-sizing: border-box; }
 .pl-root[hidden], .pl-root [hidden] { display: none !important; }
@@ -311,6 +296,9 @@
   background: var(--pl-surface); scrollbar-width: thin;
 }
 .pl-root .pl-settings h2 { margin: 0 0 10px; font: 650 24px/1.25 var(--pl-serif); }
+.pl-root .pl-settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pl-root .pl-settings-heading h2 { margin: 0; }
+.pl-root .pl-settings h3 { margin: 16px 0 5px; padding-top: 13px; border-top: 1px solid var(--pl-rule); font-size: 15px; }
 .pl-root .pl-settings .pl-status { padding: 4px 0; }
 .pl-root .pl-field { display: block; margin: 13px 0; font-size: 12px; }
 .pl-root .pl-field > span { display: block; margin: 0 0 4px; font-weight: 600; }

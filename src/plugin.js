@@ -355,7 +355,7 @@ var PaperLensPlugin = class {
   }
   saveReadingPrefs(patch) {
     const saved={...this.config()},allowed={
-      depth:['basic','standard','advanced'],scope:['selection','page','related'],answerLength:['brief','standard','detailed']
+      depth:['basic','standard','advanced'],scope:['selection','page','related'],answerLength:['brief','standard','detailed'],appearance:['system','light','dark']
     };
     for(const [key,values] of Object.entries(allowed))if(values.includes(patch[key]))saved[key]=patch[key];
     for(const [key,min,max] of [['panelWidth',300,760],['fontSize',12,20]]) {
@@ -365,6 +365,17 @@ var PaperLensPlugin = class {
     // Reading controls never read or store Login Manager credentials.
     for(const key of ['key','apiKey','api_key','password','token'])delete saved[key];
     Zotero.Prefs.set('paperLens.config',JSON.stringify(saved));return saved;
+  }
+  applyAppearance(root,appearance) {
+    const theme=['light','dark'].includes(appearance)?appearance:'system';
+    root.setAttribute('data-pl-theme',theme);
+    const picker=root.querySelector?.('.pl-appearance-select');
+    if(picker)picker.value=theme;
+  }
+  changeAppearance(appearance) {
+    const saved=this.saveReadingPrefs({appearance});
+    for(const {root} of this.panels.values())this.applyAppearance(root,saved.appearance);
+    for(const node of this.nodes)if(node.id==='paper-lens-settings-host')this.applyAppearance(node,saved.appearance);
   }
   setPanelWidth(p,width,remember=false) {
     width=Math.min(760,Math.max(300,Math.round(Number(width)||410)));
@@ -450,6 +461,7 @@ var PaperLensPlugin = class {
     const controls=this.el(doc,'div','pl-row pl-header-controls');header.append(brand,controls);root.append(header);
     const p={reader,root,doc,session,selected:session.selection?{...session.selection}:null,busy:false,turnViews:new Map()};this.panels.set(reader,p);
     const cfg=this.config();
+    this.applyAppearance(root,cfg.appearance);
     p.smaller=this.button(doc,'A−',()=>this.setReadingFont(p,p.fontSize-1,true));p.smaller.setAttribute('aria-label','缩小回答字号');p.smaller.title='缩小回答字号';
     p.larger=this.button(doc,'A+',()=>this.setReadingFont(p,p.fontSize+1,true));p.larger.setAttribute('aria-label','增大回答字号');p.larger.title='增大回答字号';
     controls.append(p.smaller,p.larger,this.button(doc,'设置',()=>this.settings(p)),this.button(doc,'收起',()=>{root.hidden=true;}));
@@ -1058,14 +1070,23 @@ var PaperLensPlugin = class {
     await note.saveTx();p.status.textContent='已保存到 Zotero 笔记'+(a.parentID?'（当前论文下）。':'（当前文库，独立附件没有父条目）。');
   }
   async settingsWindow(win) {
-    const doc=win.document;let root=doc.getElementById('paper-lens-settings-host');if(root){root.remove();}
-    root=this.el(doc,'aside','pl-root pl-floating');root.id='paper-lens-settings-host';const style=this.el(doc,'style');style.textContent=this.css;root.append(style);doc.documentElement.append(root);this.nodes.add(root);
+    const doc=win.document;let root=doc.getElementById('paper-lens-settings-host');if(root){root.remove();this.nodes.delete(root);}
+    root=this.el(doc,'aside','pl-root pl-floating');root.id='paper-lens-settings-host';this.applyAppearance(root,this.config().appearance);const style=this.el(doc,'style');style.textContent=this.css;root.append(style);doc.documentElement.append(root);this.nodes.add(root);
     const p={root,doc};this.settings(p,true);
   }
   settings(p,standalone=false) {
     if(p.settings){p.settings.remove();p.settings=null;return;}
     const {doc}=p,cfg=this.config();const box=this.el(doc,'section','pl-settings');p.settings=box;
-    box.append(this.el(doc,'h2','','连接你的 AI'));
+    let testing=false,abortTest;
+    const close=()=>{abortTest?.();if(standalone){p.root.remove();this.nodes.delete(p.root);}else box.remove();p.settings=null;};
+    const heading=this.el(doc,'header','pl-settings-heading');
+    heading.append(this.el(doc,'h2','','循文设置'),this.button(doc,'关闭',close));box.append(heading);
+    const appearance=this.el(doc,'label','pl-field');
+    const picker=this.select(doc,[['system','跟随系统'],['light','浅色'],['dark','深色']],p.root.getAttribute('data-pl-theme'),'侧栏外观');
+    picker.className='pl-appearance-select';
+    picker.addEventListener('change',()=>this.changeAppearance(picker.value));
+    appearance.append(this.el(doc,'span','','侧栏外观'),picker);
+    box.append(appearance,this.el(doc,'small','pl-muted','切换后立即保存，适用于所有循文侧栏。'),this.el(doc,'h3','','模型连接'));
     const message=this.el(doc,'p','pl-muted','支持 OpenAI 兼容的 Chat Completions 接口。API Key 仅存于 Zotero 本机凭据库，不写入笔记或会话文件。');box.append(message);
     const fields={};
     const field=(id,label,value,type='text',parent=box)=>{
@@ -1103,7 +1124,7 @@ var PaperLensPlugin = class {
     box.append(this.el(doc,'p','pl-muted','所有请求正文共同受总输入字数上限约束（字符不等于 token）。追问最多带入最近 4 轮；检索片段和历史可能按预算截取，当前选段不会自动截断。生成中每隔约 3 秒暂存新增正文；关闭会话保存不会删除已有记录。测试连接仅发送测试消息。'));
     const status=this.el(doc,'p','pl-status');status.setAttribute('role','status');box.append(status);
     const read=()=>this.C.validateConfig({...this.config(),baseURL:fields.baseURL.value,model:fields.model.value,visionBaseURL:fields.visionBaseURL.value,visionModel:fields.visionModel.value,contextChars:fields.contextChars.value,maxTokens:fields.maxTokens.value,remember:remember.checked,thinking:thinking.value});
-    const row=this.el(doc,'div','pl-row');let testing=false,abortTest;
+    const row=this.el(doc,'div','pl-row');
     const test=this.button(doc,'测试连接',async()=>{
       if(testing)return;
       try {const v=read(),secret=key.value.trim()||await this.keyFor(v.baseURL);if(!secret)throw new Error('请输入 API Key。');
@@ -1116,9 +1137,10 @@ var PaperLensPlugin = class {
         const v=read();const secret=key.value.trim();if(secret)await this.setKey(v.baseURL,secret);
         if(!await this.keyFor(v.baseURL))throw new Error('请填写此地址的 API Key。');
         if(visionKey.value.trim())await this.setKey(visionTarget(),visionKey.value.trim(),'vision');
+        v.appearance=this.config().appearance;
         Zotero.Prefs.set('paperLens.config',JSON.stringify(v));key.value='';visionKey.value='';status.textContent='设置已保存。';refreshKey();if(vision.open)refreshVisionKey();
       }catch(e){status.textContent=e.message;}
-    },'pl-button pl-primary'),this.button(doc,'关闭',()=>{abortTest?.();if(standalone)p.root.remove();else box.remove();p.settings=null;}));box.append(row);
+    },'pl-button pl-primary'),this.button(doc,'关闭',close));box.append(row);
     box.append(this.button(doc,'删除此地址的密钥',async()=>{try{await this.setKey(fields.baseURL.value,'');key.value='';status.textContent='已删除此地址的密钥。';refreshKey();}catch(e){status.textContent=e.message;}}));
     p.root.append(box);
   }
