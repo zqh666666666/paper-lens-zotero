@@ -99,3 +99,15 @@ test('raw PDF text uses the unwrapped page API and reports unresolved font slots
  }}}}}};
  const result=await p.readPageText(r,0);assert.equal(calls,1);assert.equal(result.verified,true);assert.equal(result.stats.unknownGlyphs,1);assert.match(result.text,/未识别符号/);
 });
+
+test('external citations navigate and export by stable library/key even if numeric attachment IDs change',async()=>{
+ let opened,byKey;
+ const current={libraryID:1,key:'CURRENT'},remote={id:48,key:'OTHER',libraryID:5,isPDFAttachment:()=>true};
+ const p=create({Zotero:{Items:{get:()=>current,getByLibraryAndKey:(libraryID,key)=>{byKey=[libraryID,key];return remote;}},
+   Reader:{open:async(...args)=>{opened=args;}},Libraries:{userLibraryID:1},Groups:{getGroupIDFromLibraryID:()=>777}}});
+ const source={id:'D2-P3-1',attachmentID:123,libraryID:5,attachmentKey:'OTHER',paperTitle:'Paper B',pageIndex:2,text:'Paper B evidence'};
+ const turn={id:'t',question:'compare',time:1,selection:{kind:'multi',pageIndex:0,text:'papers'},sources:[source],answer:'[D2-P3-1]'};
+ const panel={reader:{itemID:1},status:{},session:{turns:[turn],marks:{}}};
+ await p.navigateSource(panel,source);assert.deepEqual(byKey,[5,'OTHER']);assert.equal(opened[0],48);assert.equal(opened[1].pageIndex,2);
+ const md=p.exportData(panel,'md');assert.match(md,/groups\/777\/items\/OTHER\?page=3/);assert.ok(!md.includes('CURRENT?page=1'));
+});

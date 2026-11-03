@@ -36,8 +36,8 @@ function setup(config={},session={turns:[],selection:{pageIndex:0,text:'current'
   let prefs=JSON.stringify({...Core.DEFAULTS,...config});
   const doc={createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>{const n=new Element('#text');n.textContent=text;return n;}};
   const host=new Element('host'),iframe=new Element('iframe');host.append(iframe);
-  const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),URL,Zotero:{Prefs:{get:()=>prefs,set:(key,value)=>{prefs=value;}}}};
-  vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);
+  const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),URL,Zotero:{Items:{get:()=>({id:1,key:'FIXTURE',libraryID:1,getField:()=> 'Reading fixture'})},Prefs:{get:()=>prefs,set:(key,value)=>{prefs=value;}}}};
+  vm.createContext(ctx);for(const name of ['research','commands','writeback','plugin'])vm.runInContext(fs.readFileSync('src/'+name+'.js','utf8'),ctx);
   const plugin=vm.runInContext('new PaperLensPlugin("")',ctx);
   let rendered=0;plugin.renderAnswer=(p,target,text)=>{rendered++;target.textContent=text;};
   plugin.persist=async()=>{};

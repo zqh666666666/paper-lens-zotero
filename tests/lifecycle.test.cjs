@@ -369,3 +369,51 @@ test('reopening a saved empty cache does not resurrect the PDF popup selection',
   panel.reader._internalReader={_state:{primaryViewSelectionPopup:{annotation:{text:'previously removed',position:{pageIndex:0}}}}};
   await plugin.open(panel.reader);assert.equal(panel.selected,null);assert.equal(panel.session.passages.length,0);
 });
+
+test('multi-paper answer carries evidence from every required PDF and leaves the PDF selection and draft intact',async()=>{
+  const {plugin,panel}=setup();
+  const refs=['A','B'].map((attachmentKey,i)=>({attachmentKey,libraryID:1,paperTitle:'paper '+i,id:'D'+(i+1)+'-P2-1',pageIndex:1,text:'evidence '+i}));
+  const ctx={selection:{kind:'multi',pageIndex:0,text:'A and B'},sources:refs,scope:'multi',requiredDocuments:2,history:[]};
+  panel.question.value='compare';let sent;
+  plugin.request=async(_cfg,_key,msgs)=>{sent=msgs;return 'result [D2-P2-1]';};
+  await plugin.run(panel,'ask','compare',{label:'多篇论文问答',prepareContext:async()=>ctx});
+  const t=panel.session.turns[0];
+  assert.equal(t.sources.length,2);assert.equal(t.label,'多篇论文问答');assert.equal(t.question,'compare');
+  assert.match(sent.at(-1).content,/paper 1/);assert.match(sent.at(-1).content,/D2-P2-1/);
+  assert.equal(panel.question.value,'compare');assert.equal(panel.session.selection.text,'selected');
+  sent=null;await plugin.run(panel,'ask','compare',{prepareContext:async()=>({...ctx,sources:[refs[0]]})});
+  assert.equal(sent,null);assert.match(panel.status.textContent,/每篇论文/);
+});
+test('page image reaches only the wire; saved and continued answers refer to the original PDF page',async()=>{
+  const {plugin,panel,context}=setup();const jpeg='data:image/jpeg;base64,SGVsbG8=';
+  let sent,model;plugin.request=async(cfg,_key,messages)=>{model=cfg.model;sent=messages.at(-1).content;return 'visual answer';};
+  await plugin.run(panel,'ask','describe',{prepareContext:async()=>({selection:{kind:'vision',pageIndex:4,text:'第 5 页图像'},scope:'vision',sources:[],model:'vision-fixture',imageURL:jpeg})});
+  const turn=panel.session.turns[0];
+  assert.equal(sent[1].image_url.url,jpeg);assert.equal(model,'vision-fixture');
+  assert.ok(!JSON.stringify(panel.session).includes('base64'));assert.equal(panel.session.selection.text,'selected');
+  let renderedPage;context.PaperLensResearch={capturePage:async(_reader,index)=>{renderedPage=index;return {imageURL:jpeg};}};
+  await plugin.expandTurn(panel,turn);assert.equal(renderedPage,4);assert.equal(model,'vision-fixture');
+});
+test('cancel while preparing a new tool and complete-page budget rejection never transmit',async()=>{
+  const {plugin,panel}=setup();let calls=0;plugin.request=async()=>{calls++;return 'unexpected';};
+  const wait=deferred();
+  const args={selection:{kind:'document',pageIndex:0,text:'whole PDF'},sources:[{id:'P1-1',pageIndex:0,text:'e'.repeat(50000)}],requireComplete:true,history:[]};
+  const live=plugin.run(panel,'custom','summarize',{prepareContext:async()=>{await wait.promise;return args;}});
+  panel.cancelled=true;wait.resolve();await live;assert.equal(calls,0);assert.equal(panel.busy,false);
+  await plugin.run(panel,'custom','summarize',{prepareContext:async()=>args});assert.equal(calls,0);assert.match(panel.status.textContent,/上限/);
+});
+
+test('separate vision provider uses only credentials belonging to that endpoint; the text connection is unchanged',async()=>{
+ const {plugin,panel}=setup();
+ plugin.config=()=>({...Core.DEFAULTS,baseURL:'https://text.example/v1',model:'text',visionBaseURL:'https://vision.example/v1',visionModel:'visual'});
+ const auth=[],requests=[];
+ plugin.keyFor=async(url,kind)=>{auth.push([url,kind]);return url==='https://text.example/v1'?'text-only':kind==='vision'?'vision-only':'';};
+ plugin.request=async(cfg,key)=>{requests.push([cfg.baseURL,cfg.model,key]);return 'answer';};
+ const ctx=async()=>({selection:{kind:'vision',pageIndex:0,text:'p1'},imageURL:'data:image/jpeg;base64,AQ==',scope:'vision',sources:[]});
+ await plugin.run(panel,'ask','image',{prepareContext:ctx});
+ await plugin.run(panel,'explain');
+ assert.deepEqual(requests,[['https://vision.example/v1','visual','vision-only'],['https://text.example/v1','text','text-only']]);
+ auth.length=0;plugin.keyFor=async(url,kind)=>{auth.push([url,kind]);return '';};
+ await plugin.run(panel,'ask','image',{prepareContext:ctx});assert.equal(requests.length,2);
+ assert.ok(auth.every(([url])=>url==='https://vision.example/v1'));assert.match(panel.status.textContent,/读图服务/);
+});

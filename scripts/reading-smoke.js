@@ -16,7 +16,7 @@ async function runPaperLensReadingSmoke() {
     Libraries:{userLibraryID:1},Reader:{unregisterEventListener(){}},debug(){}
   };
   const scope={Zotero:mockZotero,Services,URL,Components,DOMParser,IOUtils:{},PathUtils};scope.globalThis=scope;
-  for(const name of ['retrieval','math','locations','pdf-text','passages','core','plugin','vendor/katex']) {
+  for(const name of ['retrieval','math','locations','pdf-text','passages','core','research','commands','writeback','plugin','vendor/katex']) {
     Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
   }
   const probe=new scope.PaperLensPlugin(root);probe.math=scope.PaperLensKatex;

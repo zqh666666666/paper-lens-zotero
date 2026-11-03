@@ -82,13 +82,13 @@ var PaperLensPlugin = class {
     const b=this.el(doc,'button',cls,text);b.type='button';
     b.addEventListener('click',()=>Promise.resolve().then(fn).catch(e=>this.alert(e.message||'操作未完成。')));return b;
   }
-  async keyFor(baseURL) {
-    const identity=this.C.endpoint(baseURL);
+  async keyFor(baseURL,kind='text') {
+    const identity=(kind==='vision'?'vision:':'')+this.C.endpoint(baseURL);
     const logins=Services.logins.findLogins('chrome://paper-lens',null,'Paper Lens API');
     return logins.find(x=>x.username===identity)?.password||'';
   }
-  async setKey(baseURL,key) {
-    const identity=this.C.endpoint(baseURL);
+  async setKey(baseURL,key,kind='text') {
+    const identity=(kind==='vision'?'vision:':'')+this.C.endpoint(baseURL);
     const old=Services.logins.findLogins('chrome://paper-lens',null,'Paper Lens API').find(x=>x.username===identity);
     if(!key) {if(old) Services.logins.removeLogin(old);return;}
     const login=Components.classes['@mozilla.org/login-manager/loginInfo;1'].createInstance(Components.interfaces.nsILoginInfo);
@@ -180,11 +180,11 @@ var PaperLensPlugin = class {
       }
     }
     for(const t of session.turns){
-      lines.push(`## ${t.question.replace(/\n/g,' ')}`,'',`${t.model||''} · ${new Date(t.time).toISOString()}${t.partial?' · 未完成':''}`,'',
-        `[返回选段：PDF 第 ${t.selection.pageIndex+1} 页](${link(t.selection.pageIndex)})`,'',
+      lines.push(`## ${(t.label||t.question).replace(/\n/g,' ')}`,'',...(t.label&&t.label!==t.question?[t.question,'']:[]),`${t.model||''} · ${new Date(t.time).toISOString()}${t.partial?' · 未完成':''}`,'',
+        this.sourceHeading(p,t.selection,true),'',
         ...t.selection.text.split('\n').map(s=>'> '+s),'',t.answer,'');
       if(t.pinned)lines.push(`### 暂存段落（PDF 第 ${t.pinned.pageIndex+1} 页）`,'',...t.pinned.text.split('\n').map(s=>'> '+s),'');
-      for(const s of t.sources||[])lines.push(`### [${s.id}](${link(s.pageIndex)})`,'',...s.text.split('\n').map(x=>'> '+x),'');
+      for(const s of t.sources||[])lines.push(`### [${s.id}](${this.sourceURL(p,s)}) · ${this.sourceHeading(p,s)}`,'',...s.text.split('\n').map(x=>'> '+x),'');
       if(session.marks[t.id])lines.push(`理解标记：${session.marks[t.id]}`,'');
     }
     return lines.join('\n');
@@ -382,15 +382,21 @@ var PaperLensPlugin = class {
     if(view.actionState===state)return;view.actionState=state;view.buttons.replaceChildren();
     if(t.pending)return;
     const buttons=view.buttons;
-    if(t.partial&&t.answer)buttons.append(this.button(p.doc,'继续回答',()=>this.resume(p,view.turn),'pl-button pl-primary'));
+    if(t.partial&&t.answer)buttons.append(this.button(p.doc,t.selection?.kind==='vision'?'重发原页并续写':'继续回答',()=>this.resume(p,view.turn),'pl-button pl-primary'));
     if(t.answer&&!t.partial) {
       const translation=t.action==='translate'||(!t.action&&t.question==='翻译');
-      buttons.append(this.button(p.doc,translation?'拆解长句':'深入展开',()=>this.expandTurn(p,view.turn,translation)));
+      buttons.append(this.button(p.doc,translation?'拆解长句':t.selection?.kind==='vision'?'结合原页深入展开':'深入展开',()=>this.expandTurn(p,view.turn,translation)));
     }
     buttons.append(this.button(p.doc,'保存笔记',()=>this.saveNote(p,view.turn)),this.button(p.doc,'复制',()=>{
       Components.classes['@mozilla.org/widget/clipboardhelper;1'].getService(Components.interfaces.nsIClipboardHelper).copyString(view.turn.answer);
       p.status.textContent='已复制回答。';
     }));
+    if(t.answer){
+      const write=this.el(p.doc,'details','pl-writeback');
+      write.append(this.el(p.doc,'summary','','写入 Zotero…'));
+      PaperLensWriteback.addActions(this,p,t,write);
+      buttons.append(write);
+    }
     for(const label of ['已懂','仍有疑问'])buttons.append(this.button(p.doc,label,async()=>{
       p.session.marks[view.turn.id]=label;await this.persist(p.reader);
       if(this.updateSessionViews)this.updateSessionViews(p.session);else this.refreshTurn(p,view,view.turn);
@@ -399,7 +405,7 @@ var PaperLensPlugin = class {
   async expandTurn(p,t,translation=false) {
     if(p.busy||t.pending)return;
     await this.run(p,translation?'breakdown':'ask',translation?'请拆解这段原文中难懂的长句。':'请在上一条回答的基础上深入展开，补充关键推理和必要的例子。',{
-      selection:{...t.selection},sources:t.sources||[],history:[t],pinned:t.pinned||null,scope:t.scope||'related',answerLength:'detailed',depth:t.depth||p.depth.value
+      ...this.repeatContext(p,t),history:[t],answerLength:'detailed',depth:t.depth||p.depth.value
     });
   }
   makePanel(reader,session) {
@@ -460,19 +466,26 @@ var PaperLensPlugin = class {
     p.passageNav.append(p.passagePrev, p.passagePageLabel, p.passageNext);
     p.passageCache.append(p.passageSummary, p.passageList, p.passageNav);
     p.passageCache.addEventListener('toggle', () => this.renderPassageCache(p));
-    source.append(p.passageCache);root.append(source);
+    const readingControls=this.el(doc,'div','pl-reading-controls');root.append(readingControls);
+    source.append(p.passageCache);readingControls.append(source);
     const options=this.el(doc,'div','pl-options');
     p.depth=this.select(doc,[['basic','从基础讲'],['standard','专业基础'],['advanced','深入原理']],cfg.depth,'解释深度');
     p.length=this.select(doc,[['brief','简短回答'],['standard','适中长度'],['detailed','详细展开']],cfg.answerLength||'brief','回答长度');
     p.scope=this.select(doc,[['selection','只发选段'],['page','当前页'],['related','全文检索相关段落']],cfg.scope,'发送上下文范围');
     for(const [key,control] of [['depth',p.depth],['answerLength',p.length],['scope',p.scope]])control.addEventListener('change',()=>this.saveReadingPrefs({[key]:control.value}));
-    options.append(p.depth,p.length,p.scope);root.append(options);
+    options.append(p.depth,p.length,p.scope);readingControls.append(options);
     const actions=this.el(doc,'nav','pl-actions');actions.setAttribute('aria-label','精读操作');
     for (const action of ['translate', 'explain', 'context']) {
       actions.append(this.button(doc, this.C.ACTIONS[action][0], () => this.run(p, action)));
     }
     const more=this.select(doc,[['','更多精读功能…'],...Object.entries(this.C.ACTIONS).filter(([k])=>!['translate','explain','context','ask','continue'].includes(k)).map(([k,v])=>[k,v[0]])],'','更多精读功能');
-    more.addEventListener('change',()=>{const v=more.value;more.value='';if(v)this.run(p,v);});actions.append(more);root.append(actions);
+    more.addEventListener('change',()=>{const v=more.value;more.value='';if(v)this.run(p,v);});actions.append(more);readingControls.append(actions);
+    const toolbox=this.el(doc,'details','pl-toolbox');
+    toolbox.append(this.el(doc,'summary','','阅读工具 · 多篇问答、读图、指令与笔记'));
+    const toolBody=this.el(doc,'div','pl-tools-body');toolbox.append(toolBody);readingControls.append(toolbox);
+    PaperLensResearch.mount(this,p,toolBody);
+    PaperLensCommands.mount(this,p,toolBody);
+    PaperLensWriteback.mount(this,p,toolBody);
     p.status=this.el(doc,'div','pl-status',session.loadWarning||'选择操作开始精读 · 仅在点击后发送内容');p.status.setAttribute('role','status');root.append(p.status);
     p.sources=this.el(doc,'details','pl-sources');p.sources.append(this.el(doc,'summary','','本次使用的原文'));root.append(p.sources);
     p.feed=this.el(doc,'div','pl-feed');p.feed.setAttribute('aria-label','阅读对话');root.append(p.feed);
@@ -571,10 +584,10 @@ var PaperLensPlugin = class {
   }
   renderAnswer(p,target,text,sources,selection,pinned) {
     target.replaceChildren();
-    const available=new Map(sources.map(s=>[s.id,s]));available.set('选段',selection);if(pinned)available.set('暂存',pinned);
+    const available=new Map(sources.map(s=>[s.id,s]));if(!selection.kind)available.set('选段',selection);if(pinned)available.set('暂存',pinned);
     const formatted=(parent,value,depth=0)=>{
       if(depth>3){parent.append(p.doc.createTextNode(value));return;}
-      const pattern=/(`[^`\n]+`|\*\*[^*\n]+\*\*|\[(?:P\d+-\d+|选段|暂存)\])/g;let pos=0;
+      const pattern=/(`[^`\n]+`|\*\*[^*\n]+\*\*|\[(?:(?:D\d+-)?P\d+-\d+|选段|暂存)\])/g;let pos=0;
       for(const match of value.matchAll(pattern)) {
         parent.append(p.doc.createTextNode(value.slice(pos,match.index)));const token=match[0];
         if(token.startsWith('`'))parent.append(this.el(p.doc,'code','',token.slice(1,-1)));
@@ -622,13 +635,23 @@ var PaperLensPlugin = class {
   }
   async resume(p,t) {
     if(p.busy)return;
-    await this.run(p,'continue','从上次正文中断的位置继续，不要重复已写内容。',{selection:{...t.selection},sources:t.sources||[],history:[t],pinned:t.pinned||null,scope:t.scope||'related',answerLength:t.answerLength||'detailed',depth:t.depth||p.depth?.value});
+    await this.run(p,'continue','从上次正文中断的位置继续，不要重复已写内容。',{...this.repeatContext(p,t),history:[t],answerLength:t.answerLength||'detailed',depth:t.depth||p.depth?.value});
+  }
+
+  repeatContext(p,t) {
+    const snapshot={selection:{...t.selection},sources:t.sources||[],pinned:t.pinned||null,scope:t.scope||'related',title:t.contextTitle};
+    if(t.selection?.kind==='multi')snapshot.requiredDocuments=new Set(snapshot.sources.map(s=>s.libraryID+':'+s.attachmentKey)).size;
+    if(t.selection?.kind==='vision'){
+      snapshot.prepareContext=async({cancelled})=>({imageURL:(await PaperLensResearch.capturePage(p.reader,t.selection.pageIndex,cancelled)).imageURL,model:t.model});
+    }
+    return snapshot;
   }
 
   appendTurn(p,t) {
     const position=this.captureFeedPosition(p);p.empty?.remove();p.empty=null;
     const card=this.el(p.doc,'article','pl-turn');
-    card.append(this.el(p.doc,'div','pl-turn-title',t.question));
+    card.append(this.el(p.doc,'div','pl-turn-title',t.label||t.question));
+    if(t.label&&t.label!==t.question)card.append(this.el(p.doc,'p','pl-task-question',t.question));
     const content=this.el(p.doc,'div','pl-answer');
     card.append(content);
     const meta=this.el(p.doc,'small','pl-muted');card.append(meta);
@@ -688,8 +711,29 @@ var PaperLensPlugin = class {
     if(this.cache.size>5)this.cache.delete(this.cache.keys().next().value);
     return onlyPage==null?full:result;
   }
+  sourceURL(p,source) {
+    const current=this.attachment(p.reader),libraryID=source.libraryID??current.libraryID;
+    const user=Zotero.Libraries.userLibraryID;
+    return this.C.sourceLink(libraryID,user,libraryID===user?null:Zotero.Groups.getGroupIDFromLibraryID(libraryID),source.attachmentKey||current.key,source.pageIndex);
+  }
+  sourceHeading(p,source,withLink=false) {
+    if(source.kind==='note')return '笔记选文';
+    if(source.kind==='multi')return '参与问答的论文';
+    if(source.kind==='document')return '指令使用的页段';
+    const label=(source.paperTitle?source.paperTitle+' · ':'')+(source.kind==='vision'?'页面图像 · ':'')+`PDF 第 ${source.pageIndex+1} 页`;
+    return withLink?`[${label}](${this.sourceURL(p,source)})`:label;
+  }
   async navigateSource(p,source) {
     const pageIndex=source.pageIndex;
+    if(['multi','note','document'].includes(source.kind))return;
+    if(source.attachmentKey){
+      const current=this.attachment(p.reader);
+      if(current.key!==source.attachmentKey||current.libraryID!==source.libraryID){
+        const a=Zotero.Items.getByLibraryAndKey(source.libraryID,source.attachmentKey);
+        if(!a||a.deleted||!a.isPDFAttachment())throw new Error('此来源 PDF 已不可用，请在原文库中查找。');
+        await Zotero.Reader.open(a.id,{pageIndex});p.status.textContent='已打开对应论文的原文页。';return;
+      }
+    }
     try {
       const internal=p.reader._internalReader||p.reader._iframeWindow?.wrappedJSObject?.reader;
       const view=internal?._primaryView,pdf=view?._iframeWindow?.PDFViewerApplication?.pdfDocument;
@@ -719,26 +763,39 @@ var PaperLensPlugin = class {
   async runTurn(p,action,question,options) {
     const startingSelection = p.selected;
     const startingSharedSelection = p.session.selection;
-    const original=options.selection||p.selected||p.session.selection||{pageIndex:0};
-    const selected=options.selection?{...original}:{...original,text:p.selection.value.trim()};
-    // A manual correction is authoritative; its old selection rectangles no longer describe it.
-    if(selected.text!==original.text){
-      for(const field of ['id','position','rects','nextPageRects','sourceText'])delete selected[field];
-    }
-    if(!selected.text) {p.status.textContent='请先选中文字，或在选段框粘贴内容。';return;}
-    if(selected.text.length>20000){p.status.textContent='选段超过 20,000 字，请缩小选区。';return;}
-    if(question.length>8000){p.status.textContent='追问过长，请控制在 8,000 字内。';return;}
-    if(action==='compare'&&!p.session.pinned){p.status.textContent='请先暂存一段，再选择另一段进行比较。';return;}
-    const pinned=Object.prototype.hasOwnProperty.call(options,'pinned')
-      ? (options.pinned?{...options.pinned}:null)
-      : (p.session.pinned?{...p.session.pinned}:null);
-    const usePinned=action==='compare'||action==='continue'||!!options.pinned;
-    const scope=options.scope||(['translate','breakdown'].includes(action)?'selection':p.scope.value),depth=options.depth||p.depth.value;
+    const cancelled=()=>!!(p.cancelled||p.disposed||this.stopped);
     let turn,view;
     try {
-      let cfg,key;
-      try {cfg=this.C.validateConfig(this.config());key=await this.keyFor(cfg.baseURL);if(!key)throw new Error('请先在设置中填写 API Key。');}
-      catch(e){if(!p.cancelled&&!p.disposed&&!this.stopped){p.status.textContent=e.message;this.settings(p);}return;}
+      const configSnapshot=this.config();let cfg,key;
+      const explicitContext=typeof options.prepareContext==='function';
+      if(explicitContext){
+        const context=await options.prepareContext({cfg:configSnapshot,cancelled,progress:text=>{if(!cancelled())p.status.textContent=text;}});
+        if(cancelled())throw new Error('已停止。');
+        options={...options,...context};
+      }
+      const original=options.selection||p.selected||p.session.selection||{pageIndex:0};
+      const selected=options.selection?{...original}:{...original,text:p.selection.value.trim()};
+      // A manual correction is authoritative; its old selection rectangles no longer describe it.
+      if(selected.text!==original.text){
+        for(const field of ['id','position','rects','nextPageRects','sourceText'])delete selected[field];
+      }
+      if(!selected.text) {p.status.textContent='请先选中文字，或在选段框粘贴内容。';return;}
+      if(selected.text.length>20000){p.status.textContent='选段超过 20,000 字，请缩小选区。';return;}
+      if(question.length>8000){p.status.textContent='追问过长，请控制在 8,000 字内。';return;}
+      if(action==='compare'&&!p.session.pinned){p.status.textContent='请先暂存一段，再选择另一段进行比较。';return;}
+      const pinned=Object.prototype.hasOwnProperty.call(options,'pinned')
+        ? (options.pinned?{...options.pinned}:null)
+        : (p.session.pinned?{...p.session.pinned}:null);
+      const usePinned=action==='compare'||action==='continue'||!!options.pinned;
+      const scope=options.scope||(['translate','breakdown'].includes(action)?'selection':p.scope.value),depth=options.depth||p.depth.value;
+      try {
+        const visual=selected.kind==='vision';
+        cfg=this.C.validateConfig({...configSnapshot,baseURL:visual&&configSnapshot.visionBaseURL||configSnapshot.baseURL,
+          model:options.model||(visual&&configSnapshot.visionModel)||configSnapshot.model});
+        key=visual?await this.keyFor(cfg.baseURL,'vision'):null;
+        key ||= await this.keyFor(cfg.baseURL);
+        if(!key)throw new Error(visual?'请在设置中的「读图服务」填写此地址的 API Key。':'请先在设置中填写 API Key。');
+      } catch(e){if(!p.cancelled&&!p.disposed&&!this.stopped){p.status.textContent=e.message;if(!p.settings)this.settings(p);}return;}
       if(p.cancelled||p.disposed||this.stopped)throw new Error('已停止。');
       if(!Array.isArray(options.sources)){
         let cacheUpdated = false;
@@ -784,10 +841,17 @@ var PaperLensPlugin = class {
       const candidates=hasSourceSnapshot?options.sources.map(s=>({...s})):this.C.retrieve(pages,selected.text+' '+question+' '+(action==='compare'?pinned?.text||'':''),selected.pageIndex,cfg.contextChars,scope,{action,question,selection:selected.text});
       const attachment=this.attachment(p.reader);const paper=attachment.parentID?Zotero.Items.get(attachment.parentID):attachment;
       const answerLength=options.answerLength||p.length?.value||cfg.answerLength;
-      const prepared=this.C.prepareRequest({action,selection:selected,sources:candidates,history:options.history||(action==='ask'?p.session.turns.filter(t=>!t.pending):[]),question,pinned:usePinned?pinned:null,depth,answerLength,title:paper.getField('title')},cfg.contextChars);
+      const title=options.title??(selected.kind==='note'?'Zotero 笔记':paper.getField('title'));
+      const prepared=this.C.prepareRequest({action,selection:selected,sources:candidates,history:options.history||(action==='ask'&&!explicitContext?p.session.turns.filter(t=>!t.pending&&!t.selection?.kind):[]),question,pinned:usePinned?pinned:null,depth,answerLength,title,requireComplete:options.requireComplete},cfg.contextChars);
       const {messages,sources,stats}=prepared;
+      if(options.requiredDocuments&&new Set(sources.filter(s=>s.attachmentKey).map(s=>s.libraryID+':'+s.attachmentKey)).size!==options.requiredDocuments)throw new Error('输入预算不足以保留每篇论文的依据。请减少论文数量或提高总输入字数。');
+      if(selected.kind==='vision'){
+        if(typeof options.imageURL!=='string'||!/^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(options.imageURL))throw new Error('无法取得当前 PDF 页图像，请重新打开页面后重试。');
+        const last=messages.at(-1);last.content=[{type:'text',text:last.content},{type:'image_url',image_url:{url:options.imageURL}}];
+      }
       this.renderSources(p,sources,selected,pinned,usePinned,stats);
-      turn={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),time:Date.now(),question:question||this.C.ACTIONS[action][0],action,answer:'',scope,depth,answerLength,selection:selected,pinned:usePinned?pinned:null,sources,contextStats:stats,model:cfg.model,partial:true,pending:true};
+      turn={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),time:Date.now(),question:question||options.label||this.C.ACTIONS[action]?.[0]||'阅读任务',...(options.label?{label:options.label}:{}),...(options.title?{contextTitle:title}:{}),action,answer:'',scope,depth,answerLength,selection:selected,pinned:usePinned?pinned:null,sources,contextStats:stats,model:cfg.model,partial:true,pending:true};
+      options.onTurn?.(turn);
       p.session.turns.push(turn);view=this.appendTurn(p,turn);
       p.status.textContent=`正在请求 ${new URL(cfg.baseURL).host} · 总输入 ${stats.totalChars.toLocaleString()} / ${stats.limit.toLocaleString()} 字 · ${sources.length} 个原文片段。`;
       let lastPaint=0;
@@ -800,8 +864,8 @@ var PaperLensPlugin = class {
       const follow=p.feed.scrollHeight-p.feed.scrollTop-p.feed.clientHeight<90;
       this.renderAnswer(p,view.content,result,sources,selected,turn.pinned);
       if(follow)p.feed.scrollTop=p.feed.scrollHeight;
-      if(action==='ask'&&p.question.value.trim()===question)p.question.value='';
-      p.status.textContent=`回答完成。${scope==='selection'?'本次仅发送选段。':'已使用检索页段；引用可跳转，仍需对照原文核验。'}`;
+      if(action==='ask'&&!explicitContext&&!options.label&&p.question.value.trim()===question)p.question.value='';
+      p.status.textContent='回答完成。'+({vision:'已使用指定 PDF 页的图像。',multi:'点击来源标签可打开对应论文的原页。',document:'已使用所选范围的原文。',note:'请核对改写结果后再写入笔记。',selection:'本次仅发送选段。'}[scope]||'已使用检索页段；引用可跳转，仍需对照原文核验。');
     } catch(e) {
       if(turn&&!turn.answer){p.session.turns=p.session.turns.filter(t=>t!==turn);view?.card.remove();}
       p.status.textContent=p.cancelled?'已停止；收到的部分回答已保留。':e.message||'请求未完成，请重试。';
@@ -819,9 +883,10 @@ var PaperLensPlugin = class {
   renderSources(p,sources,selection,pinned,includePinned,stats=null) {
     p.sources.replaceChildren(this.el(p.doc,'summary','',`本次使用的原文 · ${sources.length} 个检索片段`));
     if(stats)p.sources.append(this.el(p.doc,'p','pl-muted',`总输入 ${stats.totalChars.toLocaleString()} / ${stats.limit.toLocaleString()} 字（含提示词、选段和历史）。带入 ${stats.historyCount} 轮对话；省略 ${stats.omittedHistory} 轮、${stats.omittedSources} 个候选片段。${stats.truncatedSources||stats.truncatedHistory?'部分检索文字或历史已按预算截取。':''}`));
-    const rows=[{id:'选段',...selection},...(includePinned&&pinned?[{id:'暂存',...pinned}]:[]),...sources];
+    const rows=[{...selection,id:selection.kind?'任务材料':'选段'},...(includePinned&&pinned?[{...pinned,id:'暂存'}]:[]),...sources];
     for(const s of rows) {
-      const d=this.el(p.doc,'details');d.append(this.el(p.doc,'summary','',`[${s.id}] · PDF 第 ${s.pageIndex+1} 页`),this.el(p.doc,'small','pl-muted',(s.reasons||[]).join(' · ')+(s.truncated?' · 达到字数上限，片段已截取':'')+(s.extractionWarning?' · '+s.extractionWarning:'')),this.el(p.doc,'p','pl-excerpt',s.text),this.button(p.doc,'定位原文',()=>this.navigateSource(p,s)));p.sources.append(d);
+      const d=this.el(p.doc,'details');d.append(this.el(p.doc,'summary','',`[${s.id}] · ${this.sourceHeading(p,s)}`),this.el(p.doc,'small','pl-muted',(s.reasons||[]).join(' · ')+(s.truncated?' · 达到字数上限，片段已截取':'')+(s.extractionWarning?' · '+s.extractionWarning:'')),this.el(p.doc,'p','pl-excerpt',s.text));
+      if(!['multi','document','note'].includes(s.kind))d.append(this.button(p.doc,'定位原文',()=>this.navigateSource(p,s)));p.sources.append(d);
     }
   }
   request(cfg,key,messages,onText=()=>{},onAbort=()=>{}) {
@@ -865,7 +930,10 @@ var PaperLensPlugin = class {
         xhr.onprogress=()=>{if(!finished&&xhr.status>=200&&xhr.status<300)consume();};
         xhr.onload=()=>{
           if(finished)return;
-          if(xhr.status<200||xhr.status>=300)return finish(new Error(this.C.statusError(xhr.status)));
+          if(xhr.status<200||xhr.status>=300){
+            const vision=[400,415,422].includes(xhr.status)&&messages.some(m=>Array.isArray(m.content)&&m.content.some(part=>part.type==='image_url'));
+            return finish(new Error(vision?`服务未接受图片请求（HTTP ${xhr.status}）。请核对服务地址并选择支持图片输入的模型。`:this.C.statusError(xhr.status)));
+          }
           consume(true);
           if(!streamSeen) {
             let obj;
@@ -896,8 +964,9 @@ var PaperLensPlugin = class {
     const link=page=>this.C.sourceLink(a.libraryID,Zotero.Libraries.userLibraryID,groupID,a.key,page);
     const esc=this.C.escapeHTML;
     const note=new Zotero.Item('note');note.libraryID=a.libraryID;if(a.parentID)note.parentID=a.parentID;
-    const refs=(t.sources||[]).map(s=>`<p><a href="${esc(link(s.pageIndex))}">[${esc(s.id)}] PDF 第 ${s.pageIndex+1} 页</a></p><blockquote>${esc(s.text)}</blockquote>`).join('');
-    note.setNote(`<h2>循文 · ${esc(t.question)}</h2><p>${esc(t.model)} · ${esc(new Date(t.time).toLocaleString())}${t.partial?' · 未完成回答':''}</p><p><a href="${esc(link(t.selection.pageIndex))}">返回选段所在页</a></p><blockquote>${esc(t.selection.text)}</blockquote>${t.pinned?`<p><a href="${esc(link(t.pinned.pageIndex))}">暂存段落</a></p><blockquote>${esc(t.pinned.text)}</blockquote>`:''}<p>${esc(t.answer).replace(/\n/g,'<br/>')}</p><h3>使用的原文片段</h3>${refs}<p>AI 辅助解释，请对照原文核验。页码为 PDF 物理页码。</p>`);
+    const origin=['multi','note','document'].includes(t.selection.kind)?esc(this.sourceHeading(p,t.selection)):`<a href="${esc(link(t.selection.pageIndex))}">返回${t.selection.kind==='vision'?'图片':'选段'}所在页</a>`;
+    const refs=(t.sources||[]).map(s=>`<p><a href="${esc(this.sourceURL(p,s))}">[${esc(s.id)}] ${esc(this.sourceHeading(p,s))}</a></p><blockquote>${esc(s.text)}</blockquote>`).join('');
+    note.setNote(`<h2>循文 · ${esc(t.label||t.question)}</h2><p>${esc(t.model)} · ${esc(new Date(t.time).toLocaleString())}${t.partial?' · 未完成回答':''}</p><p>${origin}</p><blockquote>${esc(t.selection.text)}</blockquote>${t.pinned?`<p><a href="${esc(link(t.pinned.pageIndex))}">暂存段落</a></p><blockquote>${esc(t.pinned.text)}</blockquote>`:''}<p>${esc(t.answer).replace(/\n/g,'<br/>')}</p><h3>使用的原文片段</h3>${refs}<p>AI 辅助解释，请对照原文核验。页码为 PDF 物理页码。</p>`);
     await note.saveTx();p.status.textContent='已保存到 Zotero 笔记'+(a.parentID?'（当前论文下）。':'（当前文库，独立附件没有父条目）。');
   }
   async settingsWindow(win) {
@@ -911,9 +980,9 @@ var PaperLensPlugin = class {
     box.append(this.el(doc,'h2','','连接你的 AI'));
     const message=this.el(doc,'p','pl-muted','支持 OpenAI 兼容的 Chat Completions 接口。API Key 仅存于 Zotero 本机凭据库，不写入笔记或会话文件。');box.append(message);
     const fields={};
-    const field=(id,label,value,type='text')=>{
+    const field=(id,label,value,type='text',parent=box)=>{
       const wrap=this.el(doc,'label','pl-field');wrap.append(this.el(doc,'span','',label));
-      const input=this.el(doc,'input');input.type=type;input.value=value;input.autocomplete='off';wrap.append(input);box.append(wrap);fields[id]=input;return input;
+      const input=this.el(doc,'input');input.type=type;input.value=value;input.autocomplete='off';wrap.append(input);parent.append(wrap);fields[id]=input;return input;
     };
     field('baseURL','服务地址（Base URL）',cfg.baseURL).placeholder='https://api.deepseek.com';
     field('model','模型 ID',cfg.model).placeholder='填写服务商提供的模型 ID';
@@ -921,6 +990,21 @@ var PaperLensPlugin = class {
     const keyState=this.el(doc,'small','pl-muted');box.append(keyState);
     const refreshKey=async()=>{try{keyState.textContent=await this.keyFor(fields.baseURL.value)?'此地址已保存密钥。':'此地址尚未保存密钥。';}catch{keyState.textContent='请填写有效服务地址。';}};
     fields.baseURL.addEventListener('change',()=>{key.value='';refreshKey();});refreshKey();
+    const vision=this.el(doc,'details','pl-vision-settings');
+    vision.append(this.el(doc,'summary','','读图服务（可选）'),this.el(doc,'p','pl-muted','文字问答和读图可使用不同服务。留空沿用文字服务；仅在明确发送页图时使用这里的设置。'));
+    field('visionBaseURL','读图服务地址',cfg.visionBaseURL||'','text',vision).placeholder='留空使用上方服务地址';
+    field('visionModel','读图模型 ID',cfg.visionModel||'','text',vision).placeholder='填写支持图片输入的模型';
+    const visionKey=field('visionKey','读图 API Key', '', 'password',vision);
+    const visionTarget=()=>fields.visionBaseURL.value.trim()||fields.baseURL.value.trim();
+    const visionKeyState=this.el(doc,'small','pl-muted');
+    const refreshVisionKey=async()=>{try {
+      const target=visionTarget();
+      visionKeyState.textContent=await this.keyFor(target,'vision')?'已保存此地址的读图密钥。':await this.keyFor(target)?'未设独立读图密钥，将使用此地址已有的密钥。':'此地址尚未保存密钥。';
+    }catch{visionKeyState.textContent='请填写有效的读图服务地址。';}};
+    const resetVision=()=>{visionKey.value='';refreshVisionKey();};
+    fields.visionBaseURL.addEventListener('change',resetVision);fields.baseURL.addEventListener('change',resetVision);
+    vision.append(visionKeyState,this.button(doc,'删除此地址的独立读图密钥',async()=>{await this.setKey(visionTarget(),'','vision');resetVision();}));box.append(vision);
+    vision.addEventListener('toggle',()=>{if(vision.open)refreshVisionKey();});
     field('contextChars','总输入字数上限（含提示词、选段和历史）',cfg.contextChars,'number');
     field('maxTokens','最大输出 token',cfg.maxTokens,'number');
     const thinkingLabel=this.el(doc,'label','pl-field');thinkingLabel.append(this.el(doc,'span','','DeepSeek 回答模式'));
@@ -930,7 +1014,7 @@ var PaperLensPlugin = class {
     rememberLabel.append(remember,doc.createTextNode('在本机保存每篇论文的段落缓存及最近 30 轮对话'));box.append(rememberLabel);
     box.append(this.el(doc,'p','pl-muted','所有请求正文共同受总输入字数上限约束（字符不等于 token）。追问最多带入最近 4 轮；检索片段和历史可能按预算截取，当前选段不会自动截断。生成中每隔约 3 秒暂存新增正文；关闭会话保存不会删除已有记录。测试连接仅发送测试消息。'));
     const status=this.el(doc,'p','pl-status');status.setAttribute('role','status');box.append(status);
-    const read=()=>this.C.validateConfig({...this.config(),baseURL:fields.baseURL.value,model:fields.model.value,contextChars:fields.contextChars.value,maxTokens:fields.maxTokens.value,remember:remember.checked,thinking:thinking.value});
+    const read=()=>this.C.validateConfig({...this.config(),baseURL:fields.baseURL.value,model:fields.model.value,visionBaseURL:fields.visionBaseURL.value,visionModel:fields.visionModel.value,contextChars:fields.contextChars.value,maxTokens:fields.maxTokens.value,remember:remember.checked,thinking:thinking.value});
     const row=this.el(doc,'div','pl-row');let testing=false,abortTest;
     const test=this.button(doc,'测试连接',async()=>{
       if(testing)return;
@@ -943,7 +1027,8 @@ var PaperLensPlugin = class {
       try {
         const v=read();const secret=key.value.trim();if(secret)await this.setKey(v.baseURL,secret);
         if(!await this.keyFor(v.baseURL))throw new Error('请填写此地址的 API Key。');
-        Zotero.Prefs.set('paperLens.config',JSON.stringify(v));key.value='';status.textContent='设置已保存。';refreshKey();
+        if(visionKey.value.trim())await this.setKey(visionTarget(),visionKey.value.trim(),'vision');
+        Zotero.Prefs.set('paperLens.config',JSON.stringify(v));key.value='';visionKey.value='';status.textContent='设置已保存。';refreshKey();if(vision.open)refreshVisionKey();
       }catch(e){status.textContent=e.message;}
     },'pl-button pl-primary'),this.button(doc,'关闭',()=>{abortTest?.();if(standalone)p.root.remove();else box.remove();p.settings=null;}));box.append(row);
     box.append(this.button(doc,'删除此地址的密钥',async()=>{try{await this.setKey(fields.baseURL.value,'');key.value='';status.textContent='已删除此地址的密钥。';refreshKey();}catch(e){status.textContent=e.message;}}));

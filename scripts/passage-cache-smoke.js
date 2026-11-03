@@ -34,7 +34,7 @@ async function runPaperLensPassageCacheSmoke() {
   const scope = {Zotero:fakeZotero, Services:{scriptloader:Services.scriptloader}, Components, IOUtils:io, PathUtils, URL, DOMParser,
     fetch:url=>{if(url!==root+'src/panel.css')throw new Error('Unexpected fetch');return win.fetch(url);}};
   scope.globalThis = scope;
-  for (const name of ['retrieval','math','locations','pdf-text','passages','core','plugin']) {
+  for (const name of ['retrieval','math','locations','pdf-text','passages','core','research','commands','writeback','plugin']) {
     Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
   }
   const element = tag => doc.createElementNS('http://www.w3.org/1999/xhtml',tag);
