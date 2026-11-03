@@ -11,7 +11,7 @@ function deferred() {
 }
 
 function setup(write=async()=>{}) {
-  const context={PaperLensCore:Core,URL,
+  const context={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),URL,
     Zotero:{Items:{get:()=>({libraryID:1,key:'PAPER',getField:()=> 'Fixture'})},Reader:{unregisterEventListener(){}}},
     PathUtils:{join:(...parts)=>parts.join('/')},IOUtils:{writeUTF8:write}};
   vm.createContext(context);
@@ -33,7 +33,7 @@ function setup(write=async()=>{}) {
     feed:{replaceChildren(){},scrollHeight:100,scrollTop:0,clientHeight:100}};
   plugin.panels.set(panel.reader,panel);
   plugin.sessions.set('1-PAPER',panel.session);
-  return {plugin,panel};
+  return {plugin,panel,context};
 }
 
 test('rapid clicks reserve the panel before asynchronous credential lookup',async()=>{
@@ -115,11 +115,16 @@ test('shutdown prevents a pending panel open from recreating UI',async()=>{
   assert.equal(created,0);assert.equal(plugin.panels.size,0);
 });
 
-test('two windows keep their own passage and page while sharing completed history',async()=>{
+test('two windows share the passage cache and history but send their own observed selections',async()=>{
   const {plugin,panel}=setup();const gate=deferred(),seen=[];
-  panel.selected={text:'passage A',pageIndex:1};panel.selection.value='passage A';
-  const other={...panel,reader:{itemID:1,_window:{setTimeout,clearTimeout}},selected:{text:'passage B',pageIndex:9},selection:{value:'passage B'},status:{},cancel:{},send:{},question:{value:''}};
-  panel.session.selection={...other.selected};plugin.panels.set(other.reader,other);
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  const other={...panel,reader:{itemID:1,_window:{setTimeout,clearTimeout}},selection:{value:''},status:{},cancel:{},send:{},question:{value:''}};
+  plugin.panels.set(other.reader,other);
+  await plugin.observeSelection(panel.reader,{text:'passage A',pageIndex:1},{});
+  await plugin.observeSelection(other.reader,{text:'passage B',pageIndex:9},{});
+  assert.deepEqual(Array.from(panel.session.passages,p=>p.text),['passage B','passage A']);
+  assert.equal(other.session.passages,panel.session.passages);
+  assert.equal(panel.selection.value,'passage A');assert.equal(other.selection.value,'passage B');
   plugin.keyFor=()=>gate.promise;
   plugin.request=async(cfg,key,messages)=>{seen.push(messages.at(-1).content);return 'answer';};
   const first=plugin.run(panel,'explain'),second=plugin.run(other,'explain');gate.resolve('fixture-key');
@@ -156,15 +161,102 @@ test('oversized mandatory input is rejected before network dispatch',async()=>{
   panel.selection.value='large '.repeat(1000);plugin.request=async()=>{calls++;return 'answer';};
   await plugin.run(panel,'explain');assert.equal(calls,0);assert.match(panel.status.textContent,/总输入上限/);assert.equal(panel.session.turns.length,0);
 });
-test('selection popup actions reserve their own passage before saving',async()=>{
-  const allowSave=deferred();let content='',calls=0;
+test('a second popup click updates the sidebar and cache while the reserved action still answers the first passage',async()=>{
+  const allowKey=deferred(),allowSave=deferred();let content='',calls=0;
   const {plugin,panel}=setup(()=>allowSave.promise);
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  plugin.keyFor=()=>allowKey.promise;
   plugin.request=async(cfg,key,messages)=>{calls++;content=messages.at(-1).content;return 'answer';};
   const first=plugin.open(panel.reader,{text:'passage A',pageIndex:1},'translate');
   const second=plugin.open(panel.reader,{text:'passage B',pageIndex:5},'explain');
+  assert.equal(panel.selection.value,'passage B');assert.equal(calls,0);
+  allowKey.resolve('fixture-key');
   allowSave.resolve();await Promise.all([first,second]);
   assert.equal(calls,1);assert.ok(content.includes('passage A'));assert.ok(!content.includes('passage B'));
-  assert.equal(panel.selected.pageIndex,1);
+  assert.equal(panel.session.turns.length,1);
+  assert.equal(panel.session.turns[0].selection.pageIndex,1);
+  assert.equal(panel.session.turns[0].selection.text,'passage A');
+  assert.equal(panel.selected.pageIndex,5);
+  assert.equal(panel.selection.value,'passage B');
+  assert.deepEqual(Array.from(panel.session.passages,p=>p.text),['passage B','passage A']);
+});
+
+test('rerendering the same popup leaves an in-progress edit alone and does not resurrect a removed passage',async()=>{
+  const {plugin,panel}=setup();const popup={},source={text:'source',pageIndex:4,rects:[[1,2,8,7]]};
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  await plugin.observeSelection(panel.reader,source,popup);
+  const original=panel.session.passages[0];
+  panel.selected={text:'corrected draft',pageIndex:4};panel.selection.value=panel.selected.text;
+  await plugin.observeSelection(panel.reader,{...source},popup);
+  assert.equal(panel.selection.value,'corrected draft');
+  assert.equal(panel.selected.text,'corrected draft');
+  await plugin.commitEditedPassage(panel);
+  await plugin.removePassage(panel,original);
+  await plugin.observeSelection(panel.reader,{...source},popup);
+  assert.deepEqual(Array.from(panel.session.passages,p=>p.text),['corrected draft']);
+  assert.equal(panel.selection.value,'corrected draft');
+  await plugin.observeSelection(panel.reader,source,{});
+  assert.equal(panel.selection.value,'source');
+  assert.deepEqual(Array.from(panel.session.passages,p=>p.text),['source','corrected draft']);
+});
+
+test('finishing formula verification cannot restore a deleted passage or replace the current sidebar selection',async()=>{
+  const {plugin,panel}=setup();const started=deferred(),verified=deferred();let message;
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  plugin.readPageText=async(reader,page)=>{assert.equal(page,1);started.resolve();return verified.promise;};
+  plugin.request=async(cfg,key,messages)=>{message=messages.at(-1).content;return 'answer to original formula';};
+  await plugin.observeSelection(panel.reader,{text:'restore this later',pageIndex:3},{});
+  const toRestore=panel.session.passages[0];
+  await plugin.observeSelection(panel.reader,{text:'L = A B',pageIndex:1,rects:[[2,5,12,10]]},{});
+  const toDelete=panel.session.passages[0];
+  const run=plugin.run(panel,'formula');
+  await started.promise;
+  await plugin.observeSelection(panel.reader,{text:'next PDF passage',pageIndex:2},{});
+  await plugin.restorePassage(panel,toRestore);
+  await plugin.removePassage(panel,toDelete);
+  verified.resolve({text:'L = A − B',verified:true,stats:{}});
+  await run;
+  assert.ok(message.includes('L = A − B'));
+  assert.ok(!message.includes('next PDF passage')&&!message.includes('restore this later'));
+  assert.equal(panel.session.turns[0].selection.text,'L = A − B');
+  assert.equal(panel.session.turns[0].selection.pageIndex,1);
+  assert.equal(panel.selection.value,'restore this later');
+  assert.equal(panel.session.selection.id,toRestore.id);
+  assert.deepEqual(Array.from(panel.session.passages,p=>p.text),['restore this later','next PDF passage']);
+});
+
+test('the native popup hook caches foreign rectangle arrays locally without opening a panel or invoking the provider',async()=>{
+  let saved;const {plugin,panel,context}=setup(async(_,snapshot)=>{saved=JSON.parse(snapshot);});
+  plugin.panels.delete(panel.reader);
+  const calls={panels:0,credentials:0,requests:0};
+  plugin.makePanel=()=>{calls.panels++;return panel;};
+  plugin.keyFor=async()=>{calls.credentials++;return 'fixture-key';};
+  plugin.request=async()=>{calls.requests++;return 'unexpected answer';};
+  const handlers=new Map(),popup={};let appended=false;
+  context.Services={scriptloader:{loadSubScript(){}}};context.fetch=async()=>({text:async()=>''});
+  context.IOUtils.makeDirectory=async()=>{};context.Zotero.DataDirectory={dir:'/fixture'};
+  context.Zotero.Reader.registerEventListener=(type,fn)=>handlers.set(type,fn);
+  context.Zotero.getMainWindows=()=>[];context.Zotero.Notifier={registerObserver(){}};
+  context.Zotero.debug=()=>{};
+  await plugin.start();
+  const foreign=values=>new Proxy(values,{get(array,key){
+    if(key==='map'||key===Symbol.iterator)throw new Error('Cross-compartment iterator access');
+    return Reflect.get(array,key);
+  }});
+  const rect=foreign([1,2,3,4]);
+  const annotation={text:'native PDF paragraph',position:{pageIndex:7,rects:foreign([rect]),nextPageRects:foreign([foreign([5,6,7,8])])}};
+  const doc={createElement(){return {style:{},addEventListener(){},append(){},closest(){return popup;}};}};
+  handlers.get('renderTextSelectionPopup')({reader:panel.reader,doc,params:{annotation},append(){appended=true;}});
+  assert.ok(appended,'Zotero requires the popup to be appended synchronously');
+  rect[0]=99;
+  await Promise.all(plugin.selectionJobs);
+  assert.equal(plugin.panels.size,0);
+  assert.deepEqual(calls,{panels:0,credentials:0,requests:0});
+  assert.equal(saved.passages[0].text,'native PDF paragraph');
+  assert.equal(saved.passages[0].pageIndex,7);
+  assert.deepEqual(saved.passages[0].rects,[[1,2,3,4]]);
+  assert.deepEqual(saved.passages[0].nextPageRects,[[5,6,7,8]]);
+  assert.equal(saved.turns.length,0);
 });
 test('continuing old answers uses saved evidence even when the PDF has changed',async()=>{
   const {plugin,panel}=setup();let content='',reads=0;
@@ -181,6 +273,50 @@ test('PDF selection symbols are verified before sending and the corrected text i
  plugin.readPageText=async()=>{reads++;return {text:'L = A − R',verified:true,stats:{unknownGlyphs:0,unplacedGlyphs:0}};};
  plugin.request=async(cfg,key,messages)=>{payload=messages.at(-1).content;return 'explanation';};
  await plugin.run(panel,'formula');assert.equal(reads,1);assert.ok(payload.includes('L = A − R'));assert.equal(panel.session.turns[0].selection.text,'L = A − R');assert.equal(panel.selection.value,'L = A − R');
+});
+
+test('reselecting the native formula preserves its verified text until the original at that location changes',async()=>{
+  const {plugin,panel}=setup();const requests=[];
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  const original={text:'L = A B',pageIndex:2,rects:[[1,2,10,5]]};
+  const changed={...original,text:'L = A C'};
+  let verified='L = A − B';
+  plugin.readPageText=async()=>({text:verified,verified:true,stats:{}});
+  plugin.request=async(cfg,key,messages)=>{requests.push(messages.at(-1).content);return 'answer';};
+  await plugin.observeSelection(panel.reader,original,{});
+  const id=panel.selected.id;
+  await plugin.run(panel,'formula');
+  assert.equal(panel.session.passages[0].sourceText,original.text);
+  await plugin.observeSelection(panel.reader,{text:'B: another selection',pageIndex:4},{});
+  await plugin.observeSelection(panel.reader,original,{});
+  assert.equal(panel.selected.id,id);assert.equal(panel.selection.value,verified);
+  assert.equal(panel.session.passages.length,2);
+  assert.ok(requests[0].includes(verified)&&!requests[0].includes(original.text));
+  await plugin.observeSelection(panel.reader,changed,{});
+  assert.equal(panel.selected.id,id);assert.equal(panel.selection.value,changed.text);
+  assert.ok(!('sourceText' in panel.selected));
+  verified='L = A − C';
+  await plugin.run(panel,'formula');
+  assert.equal(panel.session.passages[0].sourceText,changed.text);
+  assert.equal(panel.session.passages[0].text,verified);
+  assert.ok(requests[1].includes(verified)&&!requests[1].includes(changed.text));
+});
+
+test('a late repair cannot overwrite changed native text at the same cached location',async()=>{
+  const {plugin,panel}=setup();const started=deferred(),gate=deferred();
+  plugin.renderSelection=p=>{p.selection.value=p.selected?.text||'';};
+  plugin.readPageText=async()=>{started.resolve();return gate.promise;};
+  plugin.request=async()=> 'answer';
+  const native={text:'A B',pageIndex:2,rects:[[1,2,10,5]]};
+  await plugin.observeSelection(panel.reader,native,{});
+  const run=plugin.run(panel,'formula');await started.promise;
+  await plugin.observeSelection(panel.reader,{text:'current sidebar passage',pageIndex:3},{});
+  await plugin.observeSelection({itemID:1},{...native,text:'A C'},{});
+  gate.resolve({text:'A − B',verified:true,stats:{}});await run;
+  assert.equal(panel.session.passages[0].text,'A C');
+  assert.ok(!('sourceText' in panel.session.passages[0]));
+  assert.equal(panel.selection.value,'current sidebar passage');
+  assert.equal(panel.session.turns[0].selection.text,'A − B');
 });
 test('manual formula corrections and historical evidence snapshots are never replaced',async()=>{
  for(const snapshot of [false,true]){
@@ -215,4 +351,21 @@ test('PDF selections spanning two pages retain both repaired page ranges',async(
  plugin.readPageText=async(reader,page)=>{reads.push(page);return {text:'page '+page+' − x',verified:true,stats:{}};};
  plugin.request=async()=> 'answer';await plugin.run(panel,'formula');
  assert.deepEqual(reads,[1,2]);assert.equal(panel.session.turns[0].selection.text,'page 1 − x\n\npage 2 − x');
+});
+
+test('opening the sidebar adopts an existing PDF selection once without replacing later manual edits',async()=>{
+  const {plugin,panel}=setup();
+  panel.reader._internalReader={_lastViewPrimary:false,_state:{secondaryViewSelectionPopup:{annotation:{text:'already highlighted',position:{pageIndex:8}}}}};
+  await plugin.open(panel.reader);
+  assert.equal(panel.selected.text,'already highlighted');
+  assert.equal(panel.session.passages[0].pageIndex,8);
+  panel.selected={pageIndex:8,text:'hand correction'};
+  await plugin.open(panel.reader);
+  assert.equal(panel.selected.text,'hand correction');
+});
+
+test('reopening a saved empty cache does not resurrect the PDF popup selection',async()=>{
+  const {plugin,panel}=setup();panel.session.version=3;panel.session.passages=[];panel.session.selection=null;panel.selected=null;
+  panel.reader._internalReader={_state:{primaryViewSelectionPopup:{annotation:{text:'previously removed',position:{pageIndex:0}}}}};
+  await plugin.open(panel.reader);assert.equal(panel.selected,null);assert.equal(panel.session.passages.length,0);
 });

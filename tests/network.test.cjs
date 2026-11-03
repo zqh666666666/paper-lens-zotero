@@ -8,7 +8,7 @@ function setup(scenario,options={}){
   send(body){sent={body:JSON.parse(body),headers:this.headers,url:this.url};queueMicrotask(()=>scenario(this));}
   abort(){this.onabort();}
  }
- const ctx={PaperLensCore:Core,XMLHttpRequest:XHR,URL,console};vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);
+ const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),XMLHttpRequest:XHR,URL,console};vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);
  return {plugin:vm.runInContext('new PaperLensPlugin("file:///")',ctx),getSent:()=>sent};
 }
 const cfg={...Core.DEFAULTS,model:'test-model'};

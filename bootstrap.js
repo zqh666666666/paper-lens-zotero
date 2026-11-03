@@ -5,6 +5,7 @@ async function startup({ rootURI }) {
   Services.scriptloader.loadSubScript(rootURI + 'src/math.js', globalThis);
   Services.scriptloader.loadSubScript(rootURI + 'src/locations.js', globalThis);
   Services.scriptloader.loadSubScript(rootURI + 'src/pdf-text.js', globalThis);
+  Services.scriptloader.loadSubScript(rootURI + 'src/passages.js', globalThis);
   Services.scriptloader.loadSubScript(rootURI + 'src/core.js', globalThis);
   Services.scriptloader.loadSubScript(rootURI + 'src/plugin.js', globalThis);
   PaperLens = new PaperLensPlugin(rootURI);

@@ -1,7 +1,7 @@
 // Read-only extraction probe for the current PDF. No credentials or model calls.
 async function runPaperLensFormulaSmoke(root) {
   const scope={Zotero,Services,Components,IOUtils,PathUtils,URL,DOMParser};scope.globalThis=scope;
-  for(const name of ['retrieval','math','locations','pdf-text','core','plugin'])Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
+  for(const name of ['retrieval','math','locations','pdf-text','passages','core','plugin'])Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
   const win=Zotero.getMainWindow(),reader=Zotero.Reader.getByTabID(win.Zotero_Tabs.selectedID);
   if(!reader)throw new Error('请先打开目标论文。');
   const probe=new scope.PaperLensPlugin(root),pages=[];

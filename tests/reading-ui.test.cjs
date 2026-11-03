@@ -36,11 +36,12 @@ function setup(config={},session={turns:[],selection:{pageIndex:0,text:'current'
   let prefs=JSON.stringify({...Core.DEFAULTS,...config});
   const doc={createElementNS:(ns,tag)=>new Element(tag),createTextNode:text=>{const n=new Element('#text');n.textContent=text;return n;}};
   const host=new Element('host'),iframe=new Element('iframe');host.append(iframe);
-  const ctx={PaperLensCore:Core,URL,Zotero:{Prefs:{get:()=>prefs,set:(key,value)=>{prefs=value;}}}};
+  const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),URL,Zotero:{Prefs:{get:()=>prefs,set:(key,value)=>{prefs=value;}}}};
   vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);
   const plugin=vm.runInContext('new PaperLensPlugin("")',ctx);
   let rendered=0;plugin.renderAnswer=(p,target,text)=>{rendered++;target.textContent=text;};
   plugin.persist=async()=>{};
+  plugin.commitEditedPassage=async p=>{p.session.selection={...p.selected};};
   const reader={_window:{document:doc},_iframe:iframe,navigate(){}};
   const panel=plugin.makePanel(reader,session);
   return {plugin,panel,doc,getPrefs:()=>JSON.parse(prefs),rendered:()=>rendered};
@@ -118,4 +119,52 @@ test('typing a formula correction clears stale PDF rectangles before running or 
   assert.equal(panel.selected.text,'x − y');assert.ok(!panel.selected.rects);
   if(event==='change')assert.ok(!session.selection.rects);
  }
+});
+
+test('passage cache is lazy, paginated and usable while the selection is collapsed',async()=>{
+  const passages=Array.from({length:19},(_,index)=>({id:`entry-${index}`,pageIndex:index,text:`段落 ${index} `+'示例'.repeat(100)}));
+  const session={turns:[],marks:{},passages,selection:passages[0]};
+  const {plugin,panel}=setup({selectionCollapsed:true},session);
+  assert.equal(panel.passageSummary.textContent,'段落缓存（19）');
+  assert.equal(panel.passageList.children.length,0);
+  assert.notEqual(panel.passageCache.parentElement,panel.selectionBody);
+  panel.passageCache.open=true;panel.passageCache.dispatch('toggle');
+  assert.equal(panel.passageList.children.length,8);
+  assert.match(panel.passageList.children[0].textContent,/PDF 第 1 页 · 当前选段/);
+  assert.ok(panel.passageList.children[0].children[0].children[1].textContent.length<=81);
+  panel.passageNext.dispatch('click');await Promise.resolve();
+  panel.passageNext.dispatch('click');await Promise.resolve();
+  assert.equal(panel.passageList.children.length,3);
+  assert.equal(panel.passagePageLabel.textContent,'3 / 3');
+  session.passages=session.passages.slice(0,16);plugin.renderSelection(panel);
+  assert.equal(panel.passagePageLabel.textContent,'2 / 2');
+  panel.passageCache.open=false;panel.passageCache.dispatch('toggle');
+  assert.equal(panel.passageList.children.length,0);
+});
+
+test('restore and delete target the clicked cache entry independently of the comparison passage',async()=>{
+  const entries=[{id:'current',pageIndex:1,text:'原文'},{id:'other',pageIndex:2,text:'另一段'}];
+  const session={turns:[],marks:{},passages:entries,selection:entries[0],pinned:{text:'比较依据',pageIndex:0}};
+  const {plugin,panel}=setup({},session);
+  let restored,removed;
+  plugin.restorePassage=async(p,entry)=>{restored=entry;};
+  plugin.removePassage=async(p,entry)=>{removed=entry;};
+  panel.passageCache.open=true;panel.passageCache.dispatch('toggle');
+  const controls=panel.passageList.children[1].children[1];
+  controls.children[0].dispatch('click');controls.children[1].dispatch('click');await Promise.resolve();
+  assert.equal(restored,entries[1]);assert.equal(removed,entries[1]);
+  assert.match(panel.pin.textContent,/比较段.*比较依据/);
+  assert.equal(session.pinned.text,'比较依据');
+});
+
+test('submitting an edited cached passage delegates the new text without its old cache ID',()=>{
+  const entry={id:'prior',pageIndex:1,text:'old',rects:[[1,2,3,4]]};
+  const {plugin,panel}=setup({}, {turns:[],marks:{},passages:[entry],selection:entry});
+  let submitted;
+  plugin.commitEditedPassage=async p=>{submitted=p.selected;};
+  panel.selection.value='修正后的公式';panel.selection.dispatch('input');
+  assert.equal(submitted,undefined);assert.equal(panel.selected.id,undefined);assert.equal(panel.selected.rects,undefined);
+  panel.selection.dispatch('change');
+  assert.equal(submitted.text,'修正后的公式');assert.equal(submitted.pageIndex,1);
+  assert.equal(entry.text,'old');
 });

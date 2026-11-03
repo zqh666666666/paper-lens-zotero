@@ -5,6 +5,9 @@ var PaperLensPlugin = class {
     this.id = 'paper-lens@local.tools';
     this.panels = new Map(); this.sessions = new Map(); this.sessionLoads = new Map(); this.writes = new Map();
     this.cache = new Map(); this.requests = new Set(); this.runs = new Set(); this.nodes = new Set();
+    this.lastPopups = new WeakMap();
+    this.readerSelections = new WeakMap();
+    this.selectionJobs = new Set();
     this.listeners = []; this.stopped = false;
   }
   get C() { return PaperLensCore; }
@@ -22,10 +25,8 @@ var PaperLensPlugin = class {
     const selection = event => {
       try {
         const {reader,doc,params,append}=event;
-        if(!params.annotation?.text) return;
-        const selected={text:this.C.cleanText(params.annotation.text),pageIndex:params.annotation.position?.pageIndex??0,
-          rects:params.annotation.position?.rects?.map(rect=>Array.from(rect)),
-          nextPageRects:params.annotation.position?.nextPageRects?.map(rect=>Array.from(rect))};
+        const selected = this.copyPDFSelection(params.annotation);
+        if (!selected) return;
         const wrap=doc.createElement('div'); wrap.className='paper-lens-popup';
         wrap.style.cssText='display:flex;gap:5px;flex-wrap:wrap;padding:7px 3px;border-top:1px solid #a0a0a055;max-width:300px';
         for(const [label,action] of [['翻译','translate'],['讲懂','explain'],['结合全文','context'],['更多…',null]]) {
@@ -36,6 +37,14 @@ var PaperLensPlugin = class {
         }
         for(const node of this.nodes)if(!node.isConnected)this.nodes.delete(node);
         append(wrap); this.nodes.add(wrap);
+        // Zotero requires append() to finish synchronously. Its popup can rerender on scroll.
+        const observed = this.observeSelection(reader, selected, wrap.closest('.custom-sections'));
+        this.selectionJobs.add(observed);
+        observed.catch(error => {
+          this.safeLog('save selected passage', error);
+          const panel = this.panels.get(reader);
+          if (panel && !panel.busy) panel.status.textContent = '段落暂未保存到本地，请检查会话文件。';
+        }).finally(() => this.selectionJobs.delete(observed));
       } catch(e) { this.safeLog('selection hook',e); }
     };
     const toolbar = ({reader,doc,append}) => {
@@ -93,17 +102,23 @@ var PaperLensPlugin = class {
     if(this.sessions.has(id))return this.sessions.get(id);
     if(!this.sessionLoads.has(id)) {
       const loading=(async()=>{
-        let value={turns:[],pinned:null,selection:null,marks:{}};
+        let value={turns:[],pinned:null,selection:null,marks:{},passages:[]};
         if(this.config().remember) {
           try {
             const saved=await IOUtils.readJSON(PathUtils.join(this.storage,id+'.json'));
             if(!Array.isArray(saved.turns))throw new Error('Invalid session');
-            value={...value,...saved};
+            const passages=PaperLensPassages.restore(saved);
+            value={...value,...saved,passages};
             value.turns=saved.turns.filter(t=>t&&typeof t.answer==='string'&&typeof t.question==='string'&&t.selection&&typeof t.selection.text==='string')
               .filter(t=>!t.pending||t.answer).slice(-30).map(t=>t.pending?{...t,pending:false,partial:true,recovered:true}:t);
             if(!value.marks||typeof value.marks!=='object'||Array.isArray(value.marks))value.marks={};
             if(value.selection&&typeof value.selection.text!=='string')value.selection=null;
             if(value.pinned&&typeof value.pinned.text!=='string')value.pinned=null;
+            for(const key of ['selection','pinned'])if(value[key]){
+              const cached=PaperLensPassages.find(value,value[key]);
+              if(cached)value[key]={...value[key],id:cached.id};
+              else delete value[key].id;
+            }
           } catch(e) {
             if(e.name!=='NotFoundError')value.loadWarning='本地会话未能读取。原文件未删除；导出或继续操作前请检查备份。';
           }
@@ -115,17 +130,21 @@ var PaperLensPlugin = class {
     try {return await this.sessionLoads.get(id);}finally{this.sessionLoads.delete(id);}
   }
   persist(reader,force=false) {
-    if(!force&&!this.config().remember) return Promise.resolve();
     const id=this.sessionID(reader),session=this.sessions.get(id);
     if(!session) return Promise.resolve();
+    const clearRequested = force && !session.selection && !session.pinned && !session.turns.length &&
+      !session.passages?.length && !Object.keys(session.marks).length;
+    if (!clearRequested && !this.config().remember) return Promise.resolve();
     // Preserve an unreadable file rather than silently replacing it with an empty session.
     if(session.loadWarning&&!force)return Promise.reject(new Error(session.loadWarning));
     const completed=session.turns.filter(t=>!t.pending).slice(-30);
     const turns=session.turns.filter(t=>t.pending||completed.includes(t));
     const marks=Object.fromEntries(turns.filter(t=>session.marks[t.id]).map(t=>[t.id,session.marks[t.id]]));
-    const snapshot=JSON.stringify({version:2,selection:session.selection,pinned:session.pinned,marks,turns});
+    const snapshot=JSON.stringify({version:PaperLensPassages.VERSION,selection:session.selection,pinned:session.pinned,passages:session.passages??[],marks,turns});
     const path=PathUtils.join(this.storage,id+'.json');
-    const pending=(this.writes.get(id)||Promise.resolve()).catch(()=>{}).then(()=>IOUtils.writeUTF8(path,snapshot,{tmpPath:path+'.tmp'}));
+    const pending=(this.writes.get(id)||Promise.resolve()).catch(()=>{}).then(()=>{
+      if(clearRequested || this.config().remember)return IOUtils.writeUTF8(path,snapshot,{tmpPath:path+'.tmp'});
+    });
     this.writes.set(id,pending);return pending;
   }
   scheduleCheckpoint(p) {
@@ -147,10 +166,19 @@ var PaperLensPlugin = class {
     const a=this.attachment(p.reader),link=page=>this.C.sourceLink(a.libraryID,Zotero.Libraries.userLibraryID,
       a.libraryID===Zotero.Libraries.userLibraryID?null:Zotero.Groups.getGroupIDFromLibraryID(a.libraryID),a.key,page);
     const session=p.session;
-    const data={format:'paper-lens-session',version:2,exportedAt:new Date().toISOString(),attachment:{libraryID:a.libraryID,key:a.key},
-      selection:session.selection,pinned:session.pinned,marks:session.marks,turns:session.turns};
+    const data={format:'paper-lens-session',version:PaperLensPassages.VERSION,exportedAt:new Date().toISOString(),attachment:{libraryID:a.libraryID,key:a.key},
+      selection:session.selection,pinned:session.pinned,passages:session.passages??[],marks:session.marks,turns:session.turns};
     if(format==='json')return JSON.stringify(data,null,2);
     const lines=['# 循文阅读记录','',`导出时间：${data.exportedAt}`,''];
+    if(data.passages.length){
+      lines.push('## 已缓存段落','');
+      for(const [index,passage] of data.passages.entries()){
+        const page=passage.pageIndex+1;
+        const range=passage.nextPageRects?.length?`${page}–${page+1}`:String(page);
+        lines.push(`### ${index+1}. [PDF 第 ${range} 页](${link(passage.pageIndex)})`,'',
+          ...passage.text.split('\n').map(line=>'> '+line),'');
+      }
+    }
     for(const t of session.turns){
       lines.push(`## ${t.question.replace(/\n/g,' ')}`,'',`${t.model||''} · ${new Date(t.time).toISOString()}${t.partial?' · 未完成':''}`,'',
         `[返回选段：PDF 第 ${t.selection.pageIndex+1} 页](${link(t.selection.pageIndex)})`,'',
@@ -172,24 +200,129 @@ var PaperLensPlugin = class {
     await IOUtils.writeUTF8(picker.file,this.exportData(p,format),{tmpPath:picker.file+'.tmp'});
     p.status.textContent=`会话已导出为 ${format==='md'?'Markdown':'JSON'}。`;
   }
+  copyPDFSelection(annotation) {
+    const text = this.C.cleanText(annotation?.text);
+    if (!text) return null;
+    const position = annotation.position;
+    const selection = {text, pageIndex: position?.pageIndex ?? 0};
+    // Read the content window's numbers directly. Calling its Array.map with a
+    // privileged callback can fail, and would retain foreign arrays in the session.
+    for (const field of ['rects', 'nextPageRects']) {
+      const source = position?.[field];
+      if (!source?.length) continue;
+      const rectangles = [];
+      for (let i = 0; i < source.length; i++) {
+        const rect = source[i];
+        if (rect?.length === 4) rectangles.push([rect[0], rect[1], rect[2], rect[3]]);
+      }
+      if (rectangles.length) selection[field] = rectangles;
+    }
+    return selection;
+  }
+  async observeSelection(reader, selected, popup) {
+    if (this.stopped) return;
+    const previous = this.lastPopups.get(reader);
+    if (previous?.popup === popup && previous?.selection.text === selected.text &&
+        PaperLensPassages.same(previous.selection, selected)) return;
+    this.lastPopups.set(reader, {popup, selection:selected});
+    const session = this.panels.get(reader)?.session ?? this.sessions.get(this.sessionID(reader)) ?? await this.session(reader);
+    if (this.stopped || reader._isUninitialized || reader._isTabClosed) {
+      PaperLensPassages.remember(session, selected);
+    } else {
+      this.selectPassage(reader, session, selected);
+    }
+    await this.persist(reader);
+  }
+  selectPassage(reader, session, selected) {
+    const panel = this.panels.get(reader);
+    if (panel?.selected?.text && !panel.selected.id) PaperLensPassages.remember(session, panel.selected);
+    const entry = PaperLensPassages.remember(session, selected);
+    const current = {...(entry || selected)};
+    this.readerSelections.set(reader, current);
+    session.selection = current;
+    if (panel) {
+      panel.selected = current;
+      panel.passagePage = 0;
+      if (!entry && !panel.busy && selected.text.length > PaperLensPassages.MAX_TEXT) {
+        panel.status.textContent = '当前选段超过 20,000 字，请缩小选区后加入缓存。';
+      }
+    }
+    this.refreshPassageViews(session);
+    return current;
+  }
+  refreshPassageViews(session) {
+    for (const panel of this.panels.values()) {
+      if (panel.session === session && !panel.disposed) this.renderSelection(panel);
+    }
+  }
+  async commitEditedPassage(panel) {
+    this.selectPassage(panel.reader, panel.session, panel.selected);
+    await this.persist(panel.reader);
+  }
+  async restorePassage(panel, entry) {
+    const saved = panel.session.passages.find(passage => passage.id === entry.id);
+    if (!saved) return;
+    this.selectPassage(panel.reader, panel.session, saved);
+    await this.persist(panel.reader);
+  }
+  async removePassage(panel, entry) {
+    const session = panel.session;
+    if (!PaperLensPassages.remove(session, entry.id)) return;
+    const replacement = session.passages[0] || null;
+    if (session.selection?.id === entry.id) session.selection = replacement;
+    if (PaperLensPassages.same(session.pinned, entry)) session.pinned = null;
+    for (const other of this.panels.values()) {
+      if (other.session === session && other.selected?.id === entry.id) {
+        other.selected = replacement;
+        this.readerSelections.set(other.reader, replacement);
+      }
+    }
+    this.refreshPassageViews(session);
+    await this.persist(panel.reader);
+  }
+  clearSelections(session) {
+    session.passages = [];
+    session.selection = null;
+    for (const panel of this.panels.values()) {
+      if (panel.session === session) {
+        panel.selected = null;
+        this.readerSelections.delete(panel.reader);
+        if (panel.sources) panel.sources.replaceChildren(this.el(panel.doc,'summary','','本次使用的原文'));
+        panel.status.textContent = '已清空这篇论文的阅读记录。';
+      }
+    }
+  }
   async open(reader,selected,action) {
     if(this.stopped)throw new Error('插件已停止。');
     let p=this.panels.get(reader);
     if(!p||!p.root.isConnected) {
       const session=await this.session(reader);
-      if(this.stopped)throw new Error('插件已停止。');
+      if(this.stopped||reader._isUninitialized||reader._isTabClosed)throw new Error('阅读器已关闭或插件已停止。');
       // A second click may arrive while the session is loading.
       p=this.panels.get(reader);
-      if(!p||!p.root.isConnected) p=this.makePanel(reader,session);
+      if(!p||!p.root.isConnected) {
+        p=this.makePanel(reader,session);
+        const recent = this.readerSelections.get(reader);
+        if (recent?.id && session.passages?.some(entry => entry.id === recent.id)) {
+          p.selected = recent;
+          this.renderSelection(p);
+        }
+      }
     }
     p.root.hidden=false;
+    if (!selected && !this.lastPopups.has(reader) && p.session.version !== PaperLensPassages.VERSION) {
+      // A selection popup may already be on screen when the plugin is installed.
+      const internal = reader._internalReader || reader._iframeWindow?.wrappedJSObject?.reader;
+      const popupKey = internal?._lastViewPrimary === false ? 'secondaryViewSelectionPopup' : 'primaryViewSelectionPopup';
+      const highlighted = this.copyPDFSelection(internal?._state?.[popupKey]?.annotation);
+      if (highlighted) await this.observeSelection(reader, highlighted, null);
+    }
     if(selected) {
-      if(p.busy) {p.status.textContent='正在回答上一处选段。请先停止或等待完成，再选择新文字。';return p;}
-      p.selected={...selected};p.session.selection={...selected};
-      this.renderSelection(p);
+      const current = this.selectPassage(reader, p.session, selected);
       // Reserve the action before an asynchronous save can admit another click.
-      if(action){await this.run(p,action,'',{selection:{...selected}});return p;}
+      if(action && !p.busy){await this.run(p,action,'',{selection:{...current}});return p;}
       await this.persist(reader);
+      return p;
     }
     if(action) await this.run(p,action);
     return p;
@@ -296,12 +429,38 @@ var PaperLensPlugin = class {
     sourceHeader.append(p.page,p.collapse);source.append(sourceHeader);
     const sourceBody=this.el(doc,'div');p.selectionBody=sourceBody;
     p.selection=this.el(doc,'textarea','pl-selected');p.selection.setAttribute('aria-label','当前选段，可纠正公式识别');p.selection.rows=4;
-    p.selection.addEventListener('input',()=>{if(!p.busy){p.selected={...(p.selected||{pageIndex:0}),text:p.selection.value};delete p.selected.position;delete p.selected.rects;delete p.selected.nextPageRects;}});
-    p.selection.addEventListener('change',()=>{if(!p.busy){p.selected={...(p.selected||{pageIndex:0}),text:p.selection.value};delete p.selected.position;delete p.selected.rects;delete p.selected.nextPageRects;session.selection={...p.selected};this.persist(reader).catch(()=>{p.status.textContent='选段暂未保存，请稍后重试。';});}});
+    const readEditedSelection = () => {
+      p.selected = {...(p.selected || {pageIndex:0}), text:p.selection.value};
+      for (const field of ['id', 'position', 'rects', 'nextPageRects', 'sourceText']) delete p.selected[field];
+    };
+    p.selection.addEventListener('input', () => { if (!p.busy) readEditedSelection(); });
+    p.selection.addEventListener('change', () => {
+      if (p.busy) return;
+      readEditedSelection();
+      this.commitEditedPassage(p).catch(() => { p.status.textContent='选段暂未保存，请稍后重试。'; });
+    });
     sourceBody.append(p.selection);
     const pinRow=this.el(doc,'div','pl-row');p.pinRow=pinRow;
-    pinRow.append(this.button(doc,'暂存这段',async()=>{if(!p.selected?.text)return;if(p.selected.text.length>20000)throw new Error('暂存段落请控制在 20,000 字内。');session.pinned={...p.selected};await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}),this.button(doc,'清除暂存',async()=>{session.pinned=null;await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}));
-    p.pin=this.el(doc,'small','pl-muted');sourceBody.append(pinRow,p.pin);source.append(sourceBody);root.append(source);
+    pinRow.append(this.button(doc,'设为比较段',async()=>{if(!p.selected?.text)return;if(p.selected.text.length>20000)throw new Error('比较段请控制在 20,000 字内。');session.pinned={...p.selected};await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}),this.button(doc,'清除比较段',async()=>{session.pinned=null;await this.persist(reader);if(this.updateSessionViews)this.updateSessionViews(session);else this.renderSelection(p);}));
+    p.pin=this.el(doc,'small','pl-muted');sourceBody.append(pinRow,p.pin);source.append(sourceBody);
+    p.passageCache = this.el(doc, 'details', 'pl-passage-cache');
+    p.passageSummary = this.el(doc, 'summary');
+    p.passageList = this.el(doc, 'ul', 'pl-passage-list');
+    p.passageList.setAttribute('aria-label', '已缓存的段落');
+    p.passagePage = 0;
+    p.passageNav = this.el(doc, 'div', 'pl-passage-nav');
+    const changePage = step => {
+      p.passagePage += step;
+      this.renderPassageCache(p);
+      p.passageList.scrollTop = 0;
+    };
+    p.passagePrev = this.button(doc, '上一页', () => changePage(-1));
+    p.passageNext = this.button(doc, '下一页', () => changePage(1));
+    p.passagePageLabel = this.el(doc, 'span');
+    p.passageNav.append(p.passagePrev, p.passagePageLabel, p.passageNext);
+    p.passageCache.append(p.passageSummary, p.passageList, p.passageNav);
+    p.passageCache.addEventListener('toggle', () => this.renderPassageCache(p));
+    source.append(p.passageCache);root.append(source);
     const options=this.el(doc,'div','pl-options');
     p.depth=this.select(doc,[['basic','从基础讲'],['standard','专业基础'],['advanced','深入原理']],cfg.depth,'解释深度');
     p.length=this.select(doc,[['brief','简短回答'],['standard','适中长度'],['detailed','详细展开']],cfg.answerLength||'brief','回答长度');
@@ -329,8 +488,8 @@ var PaperLensPlugin = class {
     p.export.addEventListener('change',()=>{const format=p.export.value;p.export.value='';if(format)this.exportSession(p,format).catch(e=>{p.status.textContent=e.message||'会话导出失败，请重试。';});});
     sendRow.append(p.send,p.cancel,p.export,this.button(doc,'清空会话',async()=>{
       if([...this.panels.values()].some(other=>other.session===session&&other.busy)){p.status.textContent='这篇论文仍有回答正在生成，请停止后再清空。';return;}
-      if(!Services.prompt.confirm(null,'清空当前论文会话','清除本插件保存的对话、暂存段落和理解标记？已保存的 Zotero 笔记不受影响。')) return;
-      session.turns=[];session.pinned=null;session.marks={};session.selection=p.selected?{...p.selected}:null;delete session.loadWarning;await this.persist(reader,true);if(this.updateSessionViews)this.updateSessionViews(session);else{this.renderFeed(p);this.renderSelection(p);}
+      if(!Services.prompt.confirm(null,'清空当前论文会话','清除这篇论文的对话、当前选段、段落缓存、比较段和理解标记？已保存的 Zotero 笔记不受影响。')) return;
+      session.turns=[];session.pinned=null;session.marks={};this.clearSelections(session);delete session.loadWarning;await this.persist(reader,true);if(this.updateSessionViews)this.updateSessionViews(session);else{this.renderFeed(p);this.renderSelection(p);}
     }));compose.append(p.question,sendRow);root.append(compose);
     // A chrome sibling keeps the API request outside the unprivileged PDF iframe.
     const iframe=reader._iframe || doc.getElementById('reader');
@@ -351,7 +510,49 @@ var PaperLensPlugin = class {
     if(p.pinRow)p.pinRow.lastElementChild.hidden=!p.session.pinned;
     p.selection.placeholder='在 PDF 中选中文字，或在这里粘贴需要解释的内容。';
     p.page.textContent=s?`选段 · PDF 第 ${s.pageIndex+1} 页 ↗`:'当前选段';p.page.disabled=!s?.text;
-    p.pin.textContent=p.session.pinned?`已暂存第 ${p.session.pinned.pageIndex+1} 页：${p.session.pinned.text.slice(0,65)}…`:'暂存一段后，可选另一段进行跨段比较。';
+    p.pin.textContent=p.session.pinned?`比较段 · 第 ${p.session.pinned.pageIndex+1} 页　${p.session.pinned.text.slice(0,65)}`:'设好比较段后，可选另一段进行跨段比较。';
+    this.renderPassageCache(p);
+  }
+  renderPassageCache(p) {
+    if (!p.passageCache) return;
+    const entries = p.session.passages || [];
+    p.passageSummary.textContent = `段落缓存（${entries.length}）`;
+    if (!p.passageCache.open) {
+      p.passagePage = 0;
+      p.passageList.replaceChildren();
+      return;
+    }
+    const pageSize = 8;
+    const pageCount = Math.max(1, Math.ceil(entries.length / pageSize));
+    p.passagePage = Math.max(0, Math.min(pageCount - 1, p.passagePage));
+    p.passagePageLabel.textContent = `${p.passagePage + 1} / ${pageCount}`;
+    p.passagePrev.disabled = p.passagePage === 0;
+    p.passageNext.disabled = p.passagePage === pageCount - 1;
+    p.passageNav.hidden = pageCount === 1;
+
+    const start = p.passagePage * pageSize;
+    const rows = entries.slice(start, start + pageSize).map(entry => {
+      const page = `PDF 第 ${entry.pageIndex + 1} 页`;
+      const current = p.selected?.id === entry.id && p.selected?.text === entry.text;
+      const row = this.el(p.doc, 'li', 'pl-cached-passage');
+      const info = this.el(p.doc, 'div', 'pl-cached-info');
+      const characters = Array.from(entry.text.trim().replace(/\s+/g, ' '));
+      const preview = characters.slice(0, 80).join('') + (characters.length > 80 ? '…' : '');
+      info.append(this.el(p.doc, 'small', 'pl-cache-page', current ? `${page} · 当前选段` : page),
+        this.el(p.doc, 'p', 'pl-cache-preview', preview));
+      const controls = this.el(p.doc, 'div', 'pl-cache-buttons');
+      const restore = this.button(p.doc, '恢复', () => this.restorePassage(p, entry));
+      const remove = this.button(p.doc, '删除', () => this.removePassage(p, entry));
+      restore.setAttribute('aria-label', `恢复${page}的段落「${preview}」`);
+      remove.setAttribute('aria-label', `删除${page}的缓存段落「${preview}」`);
+      controls.append(restore, remove);
+      row.append(info, controls);
+      return row;
+    });
+    if (!rows.length) rows.push(this.el(p.doc, 'li', 'pl-cache-empty', '还没有缓存段落。'));
+    const scrollTop = p.passageList.scrollTop;
+    p.passageList.replaceChildren(...rows);
+    p.passageList.scrollTop = scrollTop;
   }
   renderFeed(p) {
     const position=this.captureFeedPosition(p);if(!p.feedRendered)position.follow=true;
@@ -516,10 +717,14 @@ var PaperLensPlugin = class {
     return running;
   }
   async runTurn(p,action,question,options) {
+    const startingSelection = p.selected;
+    const startingSharedSelection = p.session.selection;
     const original=options.selection||p.selected||p.session.selection||{pageIndex:0};
     const selected=options.selection?{...original}:{...original,text:p.selection.value.trim()};
     // A manual correction is authoritative; its old selection rectangles no longer describe it.
-    if(selected.text!==original.text){delete selected.rects;delete selected.nextPageRects;}
+    if(selected.text!==original.text){
+      for(const field of ['id','position','rects','nextPageRects','sourceText'])delete selected[field];
+    }
     if(!selected.text) {p.status.textContent='请先选中文字，或在选段框粘贴内容。';return;}
     if(selected.text.length>20000){p.status.textContent='选段超过 20,000 字，请缩小选区。';return;}
     if(question.length>8000){p.status.textContent='追问过长，请控制在 8,000 字内。';return;}
@@ -536,6 +741,7 @@ var PaperLensPlugin = class {
       catch(e){if(!p.cancelled&&!p.disposed&&!this.stopped){p.status.textContent=e.message;this.settings(p);}return;}
       if(p.cancelled||p.disposed||this.stopped)throw new Error('已停止。');
       if(!Array.isArray(options.sources)){
+        let cacheUpdated = false;
         for(const [passage,label] of [[selected,'选段'],...(usePinned&&pinned?[[pinned,'暂存段落']]:[])]){
           if(!passage.rects?.length)continue;
           p.status.textContent=`正在核验${label}中的数学符号与上下标…`;
@@ -545,12 +751,33 @@ var PaperLensPlugin = class {
           if(p.cancelled||p.disposed||this.stopped)throw new Error('已停止。');
           if(!extracted.verified||extracted.stats.unknownGlyphs||extracted.stats.unplacedGlyphs||extracted.stats.layoutWarnings)throw new Error(`${label}含无法可靠核验的符号或二维公式，请对照 PDF 纠正为清晰公式${label==='暂存段落'?'并重新暂存':''}后重试。`);
           if(!extracted.text.trim())throw new Error('未能从选区读取文字，请重新选择或在选段框粘贴公式。');
+          const sourceText = passage.sourceText ?? passage.text;
           passage.text=extracted.text.trim();
           if(passage.text.length>20000)throw new Error('核验后的段落超过 20,000 字，请缩小选区。');
+          if (passage.text !== sourceText) passage.sourceText = sourceText;
+          else delete passage.sourceText;
+          // A second window may already have changed or removed this location.
+          // Update only the same cached source, without reviving or reordering it.
+          const cached = passage.id && p.session.passages?.find(entry => entry.id === passage.id);
+          if (cached && (cached.sourceText ?? cached.text) === sourceText &&
+              PaperLensPassages.same(cached, passage) && cached.text !== passage.text) {
+            cached.text = passage.text;
+            if (passage.sourceText) cached.sourceText = passage.sourceText;
+            else delete cached.sourceText;
+            cacheUpdated = true;
+          }
         }
-        if(selected.rects?.length){p.selected={...selected};p.session.selection={...selected};p.selection.value=selected.text;}
+        if (p.selected === startingSelection && (selected.rects?.length || !options.selection)) {
+          const current = {...selected};
+          p.selected = current;
+          this.readerSelections.set(p.reader, current);
+          if (p.session.selection === startingSharedSelection) p.session.selection = current;
+          if (selected.rects?.length) {
+            p.selection.value = selected.text;
+          }
+        }
+        if (cacheUpdated || selected.rects?.length) this.refreshPassageViews(p.session);
       }
-      if(!options.selection){p.selected={...selected};p.session.selection={...selected};}
       const hasSourceSnapshot=Array.isArray(options.sources);
       const pages=scope==='selection'||hasSourceSnapshot?[]:await this.pages(p.reader,text=>{p.status.textContent=text;},()=>p.cancelled||this.stopped,scope==='page'?selected.pageIndex:null);
       if(p.cancelled||this.stopped)throw new Error('已停止。');
@@ -700,7 +927,7 @@ var PaperLensPlugin = class {
     const thinking=this.select(doc,[['disabled','快速回答（推荐日常阅读）'],['enabled','深入思考（建议提高输出上限）'],['default','使用服务商默认模式']],cfg.thinking,'DeepSeek 回答模式');thinkingLabel.append(thinking);box.append(thinkingLabel);
     box.append(this.el(doc,'small','pl-muted','此设置仅对 api.deepseek.com 生效。深入思考可能先消耗输出额度，再生成正文。'));
     const rememberLabel=this.el(doc,'label','pl-field');const remember=this.el(doc,'input');remember.type='checkbox';remember.checked=cfg.remember;
-    rememberLabel.append(remember,doc.createTextNode('在本机保存每篇论文最近 30 轮阅读会话'));box.append(rememberLabel);
+    rememberLabel.append(remember,doc.createTextNode('在本机保存每篇论文的段落缓存及最近 30 轮对话'));box.append(rememberLabel);
     box.append(this.el(doc,'p','pl-muted','所有请求正文共同受总输入字数上限约束（字符不等于 token）。追问最多带入最近 4 轮；检索片段和历史可能按预算截取，当前选段不会自动截断。生成中每隔约 3 秒暂存新增正文；关闭会话保存不会删除已有记录。测试连接仅发送测试消息。'));
     const status=this.el(doc,'p','pl-status');status.setAttribute('role','status');box.append(status);
     const read=()=>this.C.validateConfig({...this.config(),baseURL:fields.baseURL.value,model:fields.model.value,contextChars:fields.contextChars.value,maxTokens:fields.maxTokens.value,remember:remember.checked,thinking:thinking.value});
@@ -736,7 +963,7 @@ var PaperLensPlugin = class {
     for(const [r,p] of this.panels)this.disposePanel(r,p);
     for(const node of this.nodes)try{node.remove();}catch{}
     // Aborted requests still need to append and persist their partial answer.
-    await Promise.allSettled([...this.runs,...this.sessionLoads.values()]);
+    await Promise.allSettled([...this.runs,...this.selectionJobs,...this.sessionLoads.values()]);
     await Promise.allSettled([...this.writes.values()]);
     this.nodes.clear();this.cache.clear();this.sessions.clear();this.sessionLoads.clear();this.writes.clear();
   }

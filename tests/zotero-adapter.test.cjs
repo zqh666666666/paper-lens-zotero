@@ -1,5 +1,5 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const vm=require('node:vm');const fs=require('node:fs');const Core=require('../src/core.js');
-function create(extra={}){const ctx={PaperLensCore:Core,PaperLensLocations:require('../src/locations.js'),PaperLensPDFText:require('../src/pdf-text.js'),URL,...extra};vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);return vm.runInContext('new PaperLensPlugin("")',ctx);}
+function create(extra={}){const ctx={PaperLensCore:Core,PaperLensPassages:require('../src/passages.js'),PaperLensLocations:require('../src/locations.js'),PaperLensPDFText:require('../src/pdf-text.js'),URL,...extra};vm.createContext(ctx);vm.runInContext(fs.readFileSync('src/plugin.js','utf8'),ctx);return vm.runInContext('new PaperLensPlugin("")',ctx);}
 test('Zotero 10 getPageData adapter clones arguments and caches by file version',async()=>{
  let calls=0,clones=0,stamp=1;
  const p=create({Zotero:{Items:{get:()=>({libraryID:1,key:'PDF1',getFilePathAsync:async()=>'/fixture.pdf'})}},IOUtils:{stat:async()=>({size:20,lastModified:stamp})},Components:{utils:{cloneInto:x=>{clones++;return x;}}}});

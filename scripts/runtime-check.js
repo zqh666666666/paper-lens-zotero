@@ -4,7 +4,7 @@ async function runPaperLensRuntimeCheck(outputPath) {
   const addon=await AddonManager.getAddonByID('paper-lens@local.tools');
   const root=addon.getResourceURI().spec;
   const scope={Zotero,IOUtils,PathUtils,Services,URL,Components,DOMParser};scope.globalThis=scope;
-  for(const name of ['retrieval','math','locations','pdf-text','core','plugin','vendor/katex'])Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
+  for(const name of ['retrieval','math','locations','pdf-text','passages','core','plugin','vendor/katex'])Services.scriptloader.loadSubScriptWithOptions(root+'src/'+name+'.js',{target:scope,ignoreCache:true});
   const probe=new scope.PaperLensPlugin(root);probe.math=scope.PaperLensKatex;
   const win=Zotero.getMainWindow(),doc=win.document,reader=Zotero.Reader.getByTabID(win.Zotero_Tabs.selectedID);
   const pages=await probe.pages(reader,()=>{},()=>false);
